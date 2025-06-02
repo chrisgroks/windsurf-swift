@@ -1,14 +1,15 @@
 {
   "name": "swift-vscode",
   "displayName": "Swift",
-  "description": "Swift Language Support for Visual Studio Code.",
-  "version": "2.2.0",
-  "publisher": "swiftlang",
+  "description": "Swift Language Support for Visual Studio Code (Community fork for Open VSX)",
+  "version": "2.2.1",
+  "publisher": "chrisatwindsurf",
   "icon": "icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/swiftlang/vscode-swift"
+    "url": "https://github.com/chrisgroks/windsurf-swift"
   },
+  "homepage": "https://github.com/chrisgroks/windsurf-swift#readme",
   "engines": {
     "vscode": "^1.88.0"
   },
@@ -1651,7 +1652,7 @@
     ]
   },
   "extensionDependencies": [
-    "llvm-vs-code-extensions.lldb-dap"
+    "vadimcn.vscode-lldb"
   ],
   "scripts": {
     "vscode:prepublish": "npm run bundle",
