@@ -11,18 +11,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
 import * as path from "path";
+import * as vscode from "vscode";
+
 import { WorkspaceContext } from "../WorkspaceContext";
-import { DebugAdapter, LaunchConfigType, SWIFT_LAUNCH_CONFIG_TYPE } from "./debugAdapter";
-import { registerLoggingDebugAdapterTracker } from "./logTracker";
-import { SwiftToolchain } from "../toolchain/toolchain";
-import { SwiftOutputChannel } from "../ui/SwiftOutputChannel";
-import { fileExists } from "../utilities/filesystem";
-import { updateLaunchConfigForCI, getLLDBLibPath } from "./lldb";
-import { getErrorDescription, swiftRuntimeEnv } from "../utilities/utilities";
 import configuration from "../configuration";
+import { SwiftLogger } from "../logging/SwiftLogger";
+import { SwiftToolchain } from "../toolchain/toolchain";
+import { fileExists } from "../utilities/filesystem";
+import { getErrorDescription, swiftRuntimeEnv } from "../utilities/utilities";
+import { DebugAdapter, LaunchConfigType, SWIFT_LAUNCH_CONFIG_TYPE } from "./debugAdapter";
+import { getLLDBLibPath, updateLaunchConfigForCI } from "./lldb";
+import { registerLoggingDebugAdapterTracker } from "./logTracker";
 
 /**
  * Registers the active debugger with the extension, and reregisters it
@@ -87,7 +87,7 @@ export class LLDBDebugConfigurationProvider implements vscode.DebugConfiguration
     constructor(
         private platform: NodeJS.Platform,
         private workspaceContext: WorkspaceContext,
-        private outputChannel: SwiftOutputChannel
+        private logger: SwiftLogger
     ) {}
 
     async resolveDebugConfigurationWithSubstitutedVariables(
@@ -151,6 +151,11 @@ export class LLDBDebugConfigurationProvider implements vscode.DebugConfiguration
             if (!(await this.promptForCodeLldbSettings(toolchain))) {
                 return undefined;
             }
+            // Rename lldb-dap's "terminateCommands" to "preTerminateCommands" for CodeLLDB
+            if ("terminateCommands" in launchConfig) {
+                launchConfig["preTerminateCommands"] = launchConfig["terminateCommands"];
+                delete launchConfig["terminateCommands"];
+            }
         } else if (launchConfig.type === LaunchConfigType.LLDB_DAP) {
             if (launchConfig.env) {
                 launchConfig.env = this.convertEnvironmentVariables(launchConfig.env);
@@ -205,7 +210,7 @@ export class LLDBDebugConfigurationProvider implements vscode.DebugConfiguration
             void vscode.window.showWarningMessage(
                 `Failed to setup CodeLLDB for debugging of Swift code. Debugging may produce unexpected results. ${errorMessage}`
             );
-            this.outputChannel.log(`Failed to setup CodeLLDB: ${errorMessage}`);
+            this.logger.error(`Failed to setup CodeLLDB: ${errorMessage}`);
             return true;
         }
         const libLldbPath = libLldbPathResult.success;

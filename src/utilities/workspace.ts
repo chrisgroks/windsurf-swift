@@ -11,9 +11,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
+import { basename } from "path";
 import * as vscode from "vscode";
-import { pathExists } from "./filesystem";
+
+import { globDirectory, pathExists } from "./filesystem";
 
 export async function searchForPackages(
     folder: vscode.Uri,
@@ -32,14 +33,10 @@ export async function searchForPackages(
             return;
         }
 
-        await vscode.workspace.fs.readDirectory(folder).then(async entries => {
+        await globDirectory(folder, { onlyDirectories: true }).then(async entries => {
             for (const entry of entries) {
-                if (
-                    entry[1] === vscode.FileType.Directory &&
-                    entry[0][0] !== "." &&
-                    entry[0] !== "Packages"
-                ) {
-                    await search(vscode.Uri.joinPath(folder, entry[0]));
+                if (basename(entry) !== "." && basename(entry) !== "Packages") {
+                    await search(vscode.Uri.file(entry));
                 }
             }
         });

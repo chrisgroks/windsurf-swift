@@ -11,17 +11,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
 import * as assert from "assert";
+import * as vscode from "vscode";
+
+import { WorkspaceContext } from "@src/WorkspaceContext";
+import { SwiftToolchain } from "@src/toolchain/toolchain";
+
 import { testSwiftTask } from "../../fixtures";
-import { WorkspaceContext } from "../../../src/WorkspaceContext";
-import {
-    executeTaskAndWaitForResult,
-    waitForNoRunningTasks,
-    waitForStartTaskProcess,
-} from "../../utilities/tasks";
-import { SwiftToolchain } from "../../../src/toolchain/toolchain";
+import { executeTaskAndWaitForResult, waitForStartTaskProcess } from "../../utilities/tasks";
 import { activateExtensionForSuite } from "../utilities/testutilities";
 
 suite("SwiftExecution Tests Suite", () => {
@@ -36,10 +33,6 @@ suite("SwiftExecution Tests Suite", () => {
             assert.notEqual(workspaceContext.folders.length, 0);
             workspaceFolder = workspaceContext.folders[0].workspaceFolder;
         },
-    });
-
-    setup(async () => {
-        await waitForNoRunningTasks();
     });
 
     test("Close event handler fires", async () => {

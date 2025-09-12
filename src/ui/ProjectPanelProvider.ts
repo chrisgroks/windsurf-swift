@@ -11,18 +11,23 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
+import { convertPathToPattern, glob } from "fast-glob";
+import { existsSync } from "fs";
 import * as fs from "fs/promises";
 import * as path from "path";
-import configuration from "../configuration";
+import * as vscode from "vscode";
+
+import { FolderContext } from "../FolderContext";
+import { Dependency, ResolvedDependency, Target } from "../SwiftPackage";
 import { WorkspaceContext } from "../WorkspaceContext";
 import { FolderOperation } from "../WorkspaceContext";
-import contextKeys from "../contextKeys";
-import { Dependency, ResolvedDependency, Target } from "../SwiftPackage";
-import { FolderContext } from "../FolderContext";
+import configuration from "../configuration";
+import { SwiftTask, TaskPlatformSpecificConfig } from "../tasks/SwiftTaskProvider";
+import { getPlatformConfig, resolveTaskCwd } from "../utilities/tasks";
+import { Version } from "../utilities/version";
 
 const LOADING_ICON = "loading~spin";
+
 /**
  * References:
  *
@@ -35,20 +40,45 @@ const LOADING_ICON = "loading~spin";
  */
 
 /**
+ * Returns an array of file globs that define files that should be excluded from the project panel explorer.
+ */
+function excludedFilesForProjectPanelExplorer(): string[] {
+    const config = vscode.workspace.getConfiguration("files");
+    const packageDepsExcludeList = configuration.excludePathsFromPackageDependencies;
+    if (!Array.isArray(packageDepsExcludeList)) {
+        throw new Error("Expected excludePathsFromPackageDependencies to be an array");
+    }
+
+    const vscodeExcludeList = config.get<{ [key: string]: boolean }>("exclude") ?? {};
+    const vscodeFileTypesToExclude = Object.keys(vscodeExcludeList).filter(
+        key => vscodeExcludeList[key]
+    );
+    return [...packageDepsExcludeList, ...vscodeFileTypesToExclude];
+}
+
+/**
  * Returns a {@link FileNode} for every file or subdirectory
  * in the given directory.
  */
-async function getChildren(directoryPath: string, parentId?: string): Promise<FileNode[]> {
-    const contents = await fs.readdir(directoryPath);
+async function getChildren(
+    directoryPath: string,
+    excludedFiles: string[],
+    parentId?: string,
+    mockFs?: (folder: string) => Promise<string[]>
+): Promise<FileNode[]> {
+    const contents = mockFs
+        ? await mockFs(directoryPath)
+        : await glob(`${convertPathToPattern(directoryPath)}/*`, {
+              ignore: excludedFiles,
+              absolute: true,
+              onlyFiles: false,
+          });
     const results: FileNode[] = [];
-    const excludes = configuration.excludePathsFromPackageDependencies;
-    for (const fileName of contents) {
-        if (excludes.includes(fileName)) {
-            continue;
-        }
-        const filePath = path.join(directoryPath, fileName);
+    for (const filePath of contents) {
         const stats = await fs.stat(filePath);
-        results.push(new FileNode(fileName, filePath, stats.isDirectory(), parentId));
+        results.push(
+            new FileNode(path.basename(filePath), filePath, stats.isDirectory(), parentId, mockFs)
+        );
     }
     return results.sort((first, second) => {
         if (first.isDirectory === second.isDirectory) {
@@ -67,14 +97,33 @@ async function getChildren(directoryPath: string, parentId?: string): Promise<Fi
 export class PackageNode {
     private id: string;
 
+    /**
+     * "instanceof" has a bad effect in our nightly tests when the VSIX
+     * bundled source is used. For example:
+     *
+     * ```
+     * vscode.commands.registerCommand(Commands.UNEDIT_DEPENDENCY, async (item, folder) => {
+     *  if (item instanceof PackageNode) {
+     *      return await uneditDependency(item.name, ctx, folder);
+     *  }
+     * }),
+     * ```
+     *
+     * So instead we'll check for this set boolean property. Even if the implementation of the
+     * {@link PackageNode} class changes, this property should not need to change
+     */
+    static isPackageNode = (item: { __isPackageNode?: boolean }) => item.__isPackageNode ?? false;
+    __isPackageNode = true;
+
     constructor(
         private dependency: ResolvedDependency,
         private childDependencies: (dependency: Dependency) => ResolvedDependency[],
-        private parentId?: string
+        private parentId?: string,
+        private fs?: (folder: string) => Promise<string[]>
     ) {
         this.id =
             (this.parentId ? `${this.parentId}->` : "") +
-            `${this.name}-${this.dependency.version ?? ""}`;
+            `${this.name}-${(this.dependency.version || this.dependency.revision?.substring(0, 7)) ?? ""}`;
     }
 
     get name(): string {
@@ -96,7 +145,7 @@ export class PackageNode {
     toTreeItem(): vscode.TreeItem {
         const item = new vscode.TreeItem(this.name, vscode.TreeItemCollapsibleState.Collapsed);
         item.id = this.id;
-        item.description = this.dependency.version;
+        item.description = this.getDescription();
         item.iconPath = new vscode.ThemeIcon(this.icon());
         item.contextValue = this.dependency.type;
         item.accessibilityInformation = { label: `Package ${this.name}` };
@@ -117,7 +166,12 @@ export class PackageNode {
     async getChildren(): Promise<TreeNode[]> {
         const [childDeps, files] = await Promise.all([
             this.childDependencies(this.dependency),
-            getChildren(this.dependency.path, this.id),
+            getChildren(
+                this.dependency.path,
+                excludedFilesForProjectPanelExplorer(),
+                this.id,
+                this.fs
+            ),
         ]);
         const childNodes = childDeps.map(
             dep => new PackageNode(dep, this.childDependencies, this.id)
@@ -125,6 +179,20 @@ export class PackageNode {
 
         // Show dependencies first, then files.
         return [...childNodes, ...files];
+    }
+
+    getDescription(): string {
+        switch (this.type) {
+            case "local":
+                return "local";
+            case "editing":
+                return "editing";
+            default:
+                return (
+                    // show the version if used, otherwise show the partial commit hash
+                    (this.dependency.version || this.dependency.revision?.substring(0, 7)) ?? ""
+                );
+        }
     }
 }
 
@@ -138,7 +206,8 @@ export class FileNode {
         public name: string,
         public path: string,
         public isDirectory: boolean,
-        private parentId?: string
+        private parentId?: string,
+        private fs?: (folder: string) => Promise<string[]>
     ) {
         this.id = (this.parentId ? `${this.parentId}->` : "") + `${this.path}`;
     }
@@ -167,7 +236,12 @@ export class FileNode {
     }
 
     async getChildren(): Promise<FileNode[]> {
-        return await getChildren(this.path, this.id);
+        return await getChildren(
+            this.path,
+            excludedFilesForProjectPanelExplorer(),
+            this.id,
+            this.fs
+        );
     }
 }
 
@@ -212,9 +286,13 @@ function snippetTaskName(name: string): string {
 }
 
 class TargetNode {
+    private newPluginLayoutVersion = new Version(6, 0, 0);
+
     constructor(
         public target: Target,
-        private activeTasks: Set<string>
+        private folder: FolderContext,
+        private activeTasks: Set<string>,
+        private fs?: (folder: string) => Promise<string[]>
     ) {}
 
     get name(): string {
@@ -285,7 +363,41 @@ class TargetNode {
     }
 
     getChildren(): TreeNode[] {
-        return [];
+        return this.buildPluginOutputs(this.folder.toolchain.swiftVersion);
+    }
+
+    private buildToolGlobPattern(version: Version): string {
+        const base = this.folder.folder.fsPath.replace(/\\/g, "/");
+        if (version.isGreaterThanOrEqual(this.newPluginLayoutVersion)) {
+            return `${base}/.build/plugins/outputs/*/${this.target.name}/*/*/**`;
+        } else {
+            return `${base}/.build/plugins/outputs/*/${this.target.name}/*/**`;
+        }
+    }
+
+    private buildPluginOutputs(version: Version): TreeNode[] {
+        // Files in the `outputs` directory follow the pattern:
+        // .build/plugins/outputs/buildtoolplugin/<target-name>/destination/<build-tool-plugin-name>/*
+        // This glob will capture all the files in the outputs directory for this target.
+        const pattern = this.buildToolGlobPattern(version);
+        const base = this.folder.folder.fsPath.replace(/\\/g, "/");
+        const depth = version.isGreaterThanOrEqual(this.newPluginLayoutVersion) ? 4 : 3;
+        const matches = glob.sync(pattern, { onlyFiles: false, cwd: base, deep: depth });
+        return matches.map(filePath => {
+            const pluginName = path.basename(filePath);
+            return new HeaderNode(
+                `${this.target.name}-${pluginName}`,
+                `${pluginName} - Generated Files`,
+                "debug-disconnect",
+                () =>
+                    getChildren(
+                        filePath,
+                        excludedFilesForProjectPanelExplorer(),
+                        this.target.path,
+                        this.fs
+                    )
+            );
+        });
     }
 }
 
@@ -365,14 +477,16 @@ export class ProjectPanelProvider implements vscode.TreeDataProvider<TreeNode> {
     private disposables: vscode.Disposable[] = [];
     private activeTasks: Set<string> = new Set();
     private lastComputedNodes: TreeNode[] = [];
+    private buildPluginOutputWatcher?: vscode.FileSystemWatcher;
+    private buildPluginFolderWatcher?: vscode.Disposable;
 
     onDidChangeTreeData = this.didChangeTreeDataEmitter.event;
 
     constructor(private workspaceContext: WorkspaceContext) {
         // default context key to false. These will be updated as folders are given focus
-        contextKeys.hasPackage = false;
-        contextKeys.hasExecutableProduct = false;
-        contextKeys.packageHasDependencies = false;
+        workspaceContext.contextKeys.hasPackage = false;
+        workspaceContext.contextKeys.hasExecutableProduct = false;
+        workspaceContext.contextKeys.packageHasDependencies = false;
 
         this.observeTasks(workspaceContext);
     }
@@ -424,6 +538,17 @@ export class ProjectPanelProvider implements vscode.TreeDataProvider<TreeNode> {
                 this.didChangeTreeDataEmitter.fire();
             })
         );
+
+        this.disposables.push(
+            vscode.workspace.onDidChangeConfiguration(e => {
+                if (
+                    e.affectsConfiguration("files.exclude") ||
+                    e.affectsConfiguration("swift.excludePathsFromPackageDependencies")
+                ) {
+                    this.didChangeTreeDataEmitter.fire();
+                }
+            })
+        );
     }
 
     observeFolders(treeView: vscode.TreeView<TreeNode>) {
@@ -434,6 +559,7 @@ export class ProjectPanelProvider implements vscode.TreeDataProvider<TreeNode> {
                         if (!folder) {
                             return;
                         }
+                        this.watchBuildPluginOutputs(folder);
                         treeView.title = `Swift Project (${folder.name})`;
                         this.didChangeTreeDataEmitter.fire();
                         break;
@@ -456,6 +582,33 @@ export class ProjectPanelProvider implements vscode.TreeDataProvider<TreeNode> {
         );
     }
 
+    watchBuildPluginOutputs(folderContext: FolderContext) {
+        if (this.buildPluginOutputWatcher) {
+            this.buildPluginOutputWatcher.dispose();
+        }
+        if (this.buildPluginFolderWatcher) {
+            this.buildPluginFolderWatcher.dispose();
+        }
+
+        const fire = () => this.didChangeTreeDataEmitter.fire();
+        const buildPath = path.join(folderContext.folder.fsPath, ".build/plugins/outputs");
+        this.buildPluginFolderWatcher = watchForFolder(
+            buildPath,
+            () => {
+                this.buildPluginOutputWatcher = vscode.workspace.createFileSystemWatcher(
+                    new vscode.RelativePattern(buildPath, "{*,*/*}")
+                );
+                this.buildPluginOutputWatcher.onDidCreate(fire);
+                this.buildPluginOutputWatcher.onDidDelete(fire);
+                this.buildPluginOutputWatcher.onDidChange(fire);
+            },
+            () => {
+                this.buildPluginOutputWatcher?.dispose();
+                fire();
+            }
+        );
+    }
+
     getTreeItem(element: TreeNode): vscode.TreeItem {
         return element.toTreeItem();
     }
@@ -472,7 +625,6 @@ export class ProjectPanelProvider implements vscode.TreeDataProvider<TreeNode> {
                 ...this.lastComputedNodes,
             ];
         }
-
         const nodes = await this.computeChildren(folderContext, element);
 
         // If we're fetching the root nodes then save them in case we have an error later,
@@ -535,7 +687,7 @@ export class ProjectPanelProvider implements vscode.TreeDataProvider<TreeNode> {
         }
         const pkg = folderContext.swiftPackage;
         const rootDeps = await pkg.rootDependencies;
-        if (contextKeys.flatDependenciesList) {
+        if (this.workspaceContext.contextKeys.flatDependenciesList) {
             const existenceMap = new Map<string, boolean>();
             const gatherChildren = (dependencies: ResolvedDependency[]): ResolvedDependency[] => {
                 const result: ResolvedDependency[] = [];
@@ -568,22 +720,25 @@ export class ProjectPanelProvider implements vscode.TreeDataProvider<TreeNode> {
         // Snipepts are shown under the Snippets header
         return targets
             .filter(target => target.type !== "snippet")
-            .map(target => new TargetNode(target, this.activeTasks))
+            .map(target => new TargetNode(target, folderContext, this.activeTasks))
             .sort((a, b) => targetSort(a).localeCompare(targetSort(b)));
     }
 
     private async tasks(folderContext: FolderContext): Promise<TaskNode[]> {
-        const tasks = await vscode.tasks.fetchTasks();
+        const tasks = await vscode.tasks.fetchTasks({ type: "swift" });
 
         return (
             tasks
                 // Plugin tasks are shown under the Commands header
-                .filter(
-                    task =>
-                        (!task.definition.cwd ||
-                            task.definition.cwd === folderContext.folder.fsPath) &&
-                        task.source !== "swift-plugin"
-                )
+                .filter(task => {
+                    const platform: TaskPlatformSpecificConfig | undefined =
+                        getPlatformConfig(task);
+                    return (
+                        !task.definition.cwd ||
+                        resolveTaskCwd(task, platform?.cwd ?? task.definition.cwd) ===
+                            folderContext.folder.fsPath
+                    );
+                })
                 .map(
                     (task, i) =>
                         new TaskNode(
@@ -621,7 +776,7 @@ export class ProjectPanelProvider implements vscode.TreeDataProvider<TreeNode> {
         const targets = await folderContext.swiftPackage.targets;
         return targets
             .filter(target => target.type === "snippet")
-            .flatMap(target => new TargetNode(target, this.activeTasks))
+            .flatMap(target => new TargetNode(target, folderContext, this.activeTasks))
             .sort((a, b) => a.name.localeCompare(b.name));
     }
 }
@@ -631,7 +786,7 @@ export class ProjectPanelProvider implements vscode.TreeDataProvider<TreeNode> {
  * This is a workaround for the lack of an event when tasks are added or removed.
  */
 class TaskPoller implements vscode.Disposable {
-    private previousTasks: vscode.Task[] = [];
+    private previousTasks: SwiftTask[] = [];
     private timeout?: NodeJS.Timeout;
     private static POLL_INTERVAL = 5000;
 
@@ -641,15 +796,13 @@ class TaskPoller implements vscode.Disposable {
 
     private async pollTasks() {
         try {
-            const tasks = await vscode.tasks.fetchTasks();
+            const tasks = (await vscode.tasks.fetchTasks({ type: "swift" })) as SwiftTask[];
             const tasksChanged =
                 tasks.length !== this.previousTasks.length ||
                 tasks.some((task, i) => {
                     const prev = this.previousTasks[i];
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    const c1 = (task.execution as any).command;
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    const c2 = (prev.execution as any).command;
+                    const c1 = task.execution.command;
+                    const c2 = prev.execution.command;
                     return (
                         !prev ||
                         task.name !== prev.name ||
@@ -674,4 +827,36 @@ class TaskPoller implements vscode.Disposable {
             clearTimeout(this.timeout);
         }
     }
+}
+
+/**
+ * Polls for the existence of a folder at the given path every 2.5 seconds.
+ * Notifies via the provided callbacks when the folder becomes available or is deleted.
+ */
+function watchForFolder(
+    folderPath: string,
+    onAvailable: () => void,
+    onDeleted: () => void
+): vscode.Disposable {
+    const POLL_INTERVAL = 2500;
+    let folderExists = existsSync(folderPath);
+
+    if (folderExists) {
+        onAvailable();
+    }
+
+    const interval = setInterval(() => {
+        const nowExists = existsSync(folderPath);
+        if (nowExists && !folderExists) {
+            folderExists = true;
+            onAvailable();
+        } else if (!nowExists && folderExists) {
+            folderExists = false;
+            onDeleted();
+        }
+    }, POLL_INTERVAL);
+
+    return {
+        dispose: () => clearInterval(interval),
+    };
 }

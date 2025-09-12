@@ -11,18 +11,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
+import { expect } from "chai";
 import * as vscode from "vscode";
 import * as langclient from "vscode-languageclient/node";
-import { expect } from "chai";
-import { LanguageClientManager } from "../../../src/sourcekit-lsp/LanguageClientManager";
-import { WorkspaceContext } from "../../../src/WorkspaceContext";
+
+import { FolderContext } from "@src/FolderContext";
+import { WorkspaceContext } from "@src/WorkspaceContext";
+import { LanguageClientManager } from "@src/sourcekit-lsp/LanguageClientManager";
+import { createBuildAllTask } from "@src/tasks/SwiftTaskProvider";
+
 import { testAssetUri } from "../../fixtures";
+import { tag } from "../../tags";
 import { executeTaskAndWaitForResult, waitForNoRunningTasks } from "../../utilities/tasks";
-import { createBuildAllTask } from "../../../src/tasks/SwiftTaskProvider";
+import { waitForClientState } from "../utilities/lsputilities";
 import { activateExtensionForSuite, folderInRootWorkspace } from "../utilities/testutilities";
-import { waitForClientState, waitForIndex } from "../utilities/lsputilities";
-import { FolderContext } from "../../../src/FolderContext";
 
 async function buildProject(ctx: WorkspaceContext, name: string) {
     await waitForNoRunningTasks();
@@ -33,9 +35,7 @@ async function buildProject(ctx: WorkspaceContext, name: string) {
     return folderContext;
 }
 
-suite("Language Client Integration Suite @slow", function () {
-    this.timeout(3 * 60 * 1000);
-
+tag("large").suite("Language Client Integration Suite", function () {
     let clientManager: LanguageClientManager;
     let folderContext: FolderContext;
 
@@ -51,12 +51,12 @@ suite("Language Client Integration Suite @slow", function () {
             clientManager = ctx.languageClientManager.get(folderContext);
             await clientManager.restart();
             await waitForClientState(clientManager, langclient.State.Running);
-            await waitForIndex(clientManager, folderContext.swiftVersion);
+            await clientManager.waitForIndex();
         },
     });
 
     setup(async () => {
-        await waitForIndex(clientManager, folderContext.swiftVersion);
+        await clientManager.waitForIndex();
     });
 
     suite("Symbols", () => {
@@ -103,10 +103,10 @@ suite("Language Client Integration Suite @slow", function () {
                 position
             );
 
-            // We expect 2 references - one in `main.swift` and one in `PackageLib.swift`
+            // We expect 3 references - in `main.swift`, in `PackageLib.swift` and in `hello.swift`
             expect(referenceLocations).to.have.lengthOf(
                 3,
-                "There should be two references to 'a'."
+                "There should be three references to 'a'."
             );
 
             // Extract reference URIs and sort them to have a predictable order

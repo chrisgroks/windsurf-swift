@@ -11,11 +11,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as vscode from "vscode";
+
 import { FolderContext } from "../../FolderContext";
 import { WorkspaceContext } from "../../WorkspaceContext";
-import { createSwiftTask, SwiftTaskProvider } from "../../tasks/SwiftTaskProvider";
+import { SwiftTaskProvider, createSwiftTask } from "../../tasks/SwiftTaskProvider";
+import { packageName } from "../../utilities/tasks";
 import { executeTaskWithUI, updateAfterError } from "./../utilities";
 
 /**
@@ -24,7 +25,7 @@ import { executeTaskWithUI, updateAfterError } from "./../utilities";
 export async function updateDependencies(ctx: WorkspaceContext) {
     const current = ctx.currentFolder;
     if (!current) {
-        ctx.outputChannel.log("currentFolder is not set.");
+        ctx.logger.debug("currentFolder is not set.", "updateDependencies");
         return false;
     }
     return await updateFolderDependencies(current);
@@ -41,7 +42,7 @@ export async function updateFolderDependencies(folderContext: FolderContext) {
         {
             cwd: folderContext.folder,
             scope: folderContext.workspaceFolder,
-            prefix: folderContext.name,
+            packageName: packageName(folderContext),
             presentationOptions: { reveal: vscode.TaskRevealKind.Silent },
         },
         folderContext.toolchain

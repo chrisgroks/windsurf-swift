@@ -15,9 +15,20 @@
 function Update-SwiftBuildAndPackageArguments {
     param (
         [string]$jsonFilePath = "./assets/test/.vscode/settings.json",
-        [string]$windowsSdkVersion = "10.0.22000.0",
-        [string]$vcToolsVersion = "14.43.34808"
+        [string]$codeWorkspaceFilePath = "./assets/test.code-workspace",
+        [string]$windowsSdkVersion = "10.0.22000.0"
     )
+
+    $vcToolsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
+    $vcToolsVersions = Get-ChildItem -Directory -Path $vcToolsPath | ForEach-Object { $_.Name }
+
+    if ($vcToolsVersions.Count -eq 0) {
+        Write-Host "No versions found in $vcToolsPath"
+        exit 1
+    }
+
+    $vcToolsVersion = $vcToolsVersions | Sort-Object -Descending | Select-Object -First 1
+    Write-Host "Highest Visual C++ Tools version: $vcToolsVersion"
 
     $windowsSdkRoot = "C:\Program Files (x86)\Windows Kits\10\"
 
@@ -25,6 +36,13 @@ function Update-SwiftBuildAndPackageArguments {
         $jsonContent = Get-Content -Raw -Path $jsonFilePath | ConvertFrom-Json
     } catch {
         Write-Host "Invalid JSON content in $jsonFilePath"
+        exit 1
+    }
+
+    try {
+        $codeWorkspaceContent = Get-Content -Raw -Path $codeWorkspaceFilePath | ConvertFrom-Json
+    } catch {
+        Write-Host "Invalid JSON content in $codeWorkspaceFilePath"
         exit 1
     }
 
@@ -54,10 +72,19 @@ function Update-SwiftBuildAndPackageArguments {
         "-Xswiftc", "-visualc-tools-version", "-Xswiftc", $vcToolsVersion
     )
 
+    $codeWorkspaceContent.PSObject.Properties.Remove('settings')
+    $codeWorkspaceContent | Add-Member -MemberType NoteProperty -Name "settings" -Value $jsonContent
+
     $jsonContent | ConvertTo-Json -Depth 32 | Set-Content -Path $jsonFilePath
+
+    
+    $codeWorkspaceContent | ConvertTo-Json -Depth 32 | Set-Content -Path $codeWorkspaceFilePath
 
     Write-Host "Contents of ${jsonFilePath}:"
     Get-Content -Path $jsonFilePath
+    
+    Write-Host "Contents of ${codeWorkspaceFilePath}:"
+    Get-Content -Path $codeWorkspaceFilePath
 }
 
 $swiftVersionOutput = & swift --version
@@ -68,6 +95,12 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Swift version:"
 Write-Host "$swiftVersionOutput"
+
+Write-Host "Installed MSVC Versions:"
+dir "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
+
+Write-Host "Installed Windows SDK Versions:"
+dir "C:\Program Files (x86)\Windows Kits\10\Include\"
 
 $versionLine = $swiftVersionOutput[0]
 if ($versionLine -match "Swift version (\d+)\.(\d+)") {
@@ -95,7 +128,6 @@ if ($versionLine -match "Swift version (\d+)\.(\d+)") {
 npm ci -ignore-script node-pty
 npm run lint
 npm run format
-npm run package
 npm run test
 if ($LASTEXITCODE -eq 0) {
     Write-Host 'SUCCESS'

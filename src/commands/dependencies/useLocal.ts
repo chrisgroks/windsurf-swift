@@ -11,10 +11,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as vscode from "vscode";
+
 import { FolderOperation, WorkspaceContext } from "../../WorkspaceContext";
 import { createSwiftTask } from "../../tasks/SwiftTaskProvider";
+import { packageName } from "../../utilities/tasks";
 import { executeTaskWithUI } from "../utilities";
 
 /**
@@ -31,7 +32,7 @@ export async function useLocalDependency(
 ): Promise<boolean> {
     const currentFolder = ctx.currentFolder;
     if (!currentFolder) {
-        ctx.outputChannel.log("currentFolder is not set.");
+        ctx.logger.debug("currentFolder is not set.", "useLocalDependency");
         return false;
     }
     let folder = dep;
@@ -61,7 +62,7 @@ export async function useLocalDependency(
         {
             scope: currentFolder.workspaceFolder,
             cwd: currentFolder.folder,
-            prefix: currentFolder.name,
+            packageName: packageName(currentFolder),
         },
         currentFolder.toolchain
     );

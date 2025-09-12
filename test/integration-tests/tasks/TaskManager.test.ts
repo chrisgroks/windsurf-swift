@@ -11,13 +11,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
 import * as assert from "assert";
-import { TaskManager } from "../../../src/tasks/TaskManager";
-import { WorkspaceContext } from "../../../src/WorkspaceContext";
+import * as vscode from "vscode";
+
+import { WorkspaceContext } from "@src/WorkspaceContext";
+import { TaskManager } from "@src/tasks/TaskManager";
+
 import { activateExtensionForSuite } from "../utilities/testutilities";
-import { waitForNoRunningTasks } from "../../utilities/tasks";
 
 suite("TaskManager Test Suite", () => {
     let workspaceContext: WorkspaceContext;
@@ -29,10 +29,6 @@ suite("TaskManager Test Suite", () => {
             taskManager = workspaceContext.tasks;
             assert.notEqual(workspaceContext.folders.length, 0);
         },
-    });
-
-    setup(async () => {
-        await waitForNoRunningTasks();
     });
 
     // check running task will return expected value

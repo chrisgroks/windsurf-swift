@@ -11,26 +11,24 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
+import * as assert from "assert";
 import { expect } from "chai";
 import * as vscode from "vscode";
-import * as assert from "assert";
-import { WorkspaceContext } from "../../../src/WorkspaceContext";
-import {
-    createSwiftTask,
-    createBuildAllTask,
-    getBuildAllTask,
-} from "../../../src/tasks/SwiftTaskProvider";
-import { SwiftToolchain } from "../../../src/toolchain/toolchain";
-import {
-    executeTaskAndWaitForResult,
-    waitForEndTaskProcess,
-    waitForNoRunningTasks,
-} from "../../utilities/tasks";
-import { Version } from "../../../src/utilities/version";
-import { FolderContext } from "../../../src/FolderContext";
+
+import { FolderContext } from "@src/FolderContext";
+import { WorkspaceContext } from "@src/WorkspaceContext";
+import { createBuildAllTask, createSwiftTask, getBuildAllTask } from "@src/tasks/SwiftTaskProvider";
+import { SwiftToolchain } from "@src/toolchain/toolchain";
+import { Version } from "@src/utilities/version";
+
 import { mockGlobalObject } from "../../MockUtils";
-import { activateExtensionForSuite, folderInRootWorkspace } from "../utilities/testutilities";
+import { tag } from "../../tags";
+import { executeTaskAndWaitForResult, waitForEndTaskProcess } from "../../utilities/tasks";
+import {
+    activateExtensionForSuite,
+    folderInRootWorkspace,
+    updateSettings,
+} from "../utilities/testutilities";
 
 suite("SwiftTaskProvider Test Suite", () => {
     let workspaceContext: WorkspaceContext;
@@ -51,10 +49,6 @@ suite("SwiftTaskProvider Test Suite", () => {
     });
 
     suite("createSwiftTask", () => {
-        setup(async () => {
-            await waitForNoRunningTasks();
-        });
-
         test("Exit code on success", async () => {
             const task = createSwiftTask(
                 ["--help"],
@@ -100,6 +94,13 @@ suite("SwiftTaskProvider Test Suite", () => {
     });
 
     suite("provideTasks", () => {
+        let resetSettings: (() => Promise<void>) | undefined;
+        teardown(async () => {
+            if (resetSettings) {
+                await resetSettings();
+            }
+        });
+
         suite("includes build all task from extension", () => {
             let task: vscode.Task | undefined;
 
@@ -109,18 +110,16 @@ suite("SwiftTaskProvider Test Suite", () => {
             });
 
             test("provided", async () => {
-                expect(task?.detail)
-                    .to.include("swift build --build-tests")
-                    .and.to.include("-Xswiftc -diagnostic-style=llvm");
+                expect(task?.detail).to.include("swift build --build-tests");
             });
 
-            test("executes @slow", async () => {
+            tag("large").test("executes", async () => {
                 assert(task);
                 const exitPromise = waitForEndTaskProcess(task);
                 await vscode.tasks.executeTask(task);
                 const exitCode = await exitPromise;
                 expect(exitCode).to.equal(0);
-            }).timeout(180000); // 3 minutes to build
+            });
         });
 
         suite("includes build all task from tasks.json", () => {
@@ -128,7 +127,12 @@ suite("SwiftTaskProvider Test Suite", () => {
 
             setup(async () => {
                 const tasks = await vscode.tasks.fetchTasks({ type: "swift" });
-                task = tasks.find(t => t.name === "swift: Build All from tasks.json");
+                task = tasks.find(
+                    t =>
+                        t.name ===
+                        "swift: Build All from " +
+                            (vscode.workspace.workspaceFile ? "code workspace" : "tasks.json")
+                );
             });
 
             test("provided", async () => {
@@ -147,9 +151,47 @@ suite("SwiftTaskProvider Test Suite", () => {
         test("includes product debug task", async () => {
             const tasks = await vscode.tasks.fetchTasks({ type: "swift" });
             const task = tasks.find(t => t.name === "Build Debug PackageExe (defaultPackage)");
-            expect(task?.detail)
-                .to.include("swift build --product PackageExe")
-                .and.to.include("-Xswiftc -diagnostic-style=llvm");
+            expect(
+                task,
+                'expected to find a task named "Build Debug PackageExe (defaultPackage)", instead found ' +
+                    tasks.map(t => t.name)
+            ).to.not.be.undefined;
+            expect(task?.detail).to.include("swift build --product PackageExe");
+        });
+
+        test("includes library build tasks task", async () => {
+            const taskProvider = workspaceContext.taskProvider;
+            let tasks = await taskProvider.provideTasks(new vscode.CancellationTokenSource().token);
+            let task = tasks.find(t => t.name === "Build Debug PackageLib2 (defaultPackage)");
+            expect(task).to.be.undefined;
+            task = tasks.find(t => t.name === "Build Release PackageLib2 (defaultPackage)");
+            expect(task).to.be.undefined;
+
+            resetSettings = await updateSettings({
+                "swift.createTasksForLibraryProducts": true,
+            });
+
+            tasks = await taskProvider.provideTasks(new vscode.CancellationTokenSource().token);
+            task = tasks.find(t => t.name === "Build Debug PackageLib2 (defaultPackage)");
+            expect(
+                task,
+                'expected to find a task named "Build Debug PackageLib2 (defaultPackage)", instead found ' +
+                    tasks.map(t => t.name)
+            ).to.not.be.undefined;
+            expect(task?.detail).to.include("swift build --product PackageLib2");
+            task = tasks.find(t => t.name === "Build Release PackageLib2 (defaultPackage)");
+            expect(
+                task,
+                'expected to find a task named "Build Release PackageLib2 (defaultPackage)", instead found ' +
+                    tasks.map(t => t.name)
+            ).to.not.be.undefined;
+            expect(task?.detail).to.include("swift build -c release --product PackageLib2");
+
+            // Don't include automatic products
+            task = tasks.find(t => t.name === "Build Debug PackageLib (defaultPackage)");
+            expect(task).to.be.undefined;
+            task = tasks.find(t => t.name === "Build Release PackageLib (defaultPackage)");
+            expect(task).to.be.undefined;
         });
 
         test("includes product release task", async () => {
@@ -158,6 +200,11 @@ suite("SwiftTaskProvider Test Suite", () => {
                 new vscode.CancellationTokenSource().token
             );
             const task = tasks.find(t => t.name === "Build Release PackageExe (defaultPackage)");
+            expect(
+                task,
+                'expected to find a task named "Build Release PackageExe (defaultPackage)", instead found ' +
+                    tasks.map(t => t.name)
+            ).to.not.be.undefined;
             expect(task?.detail).to.include("swift build -c release --product PackageExe");
         });
 

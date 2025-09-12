@@ -11,10 +11,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as vscode from "vscode";
-import { createSwiftTask } from "../../tasks/SwiftTaskProvider";
+
+import { FolderContext } from "../../FolderContext";
 import { FolderOperation, WorkspaceContext } from "../../WorkspaceContext";
+import { createSwiftTask } from "../../tasks/SwiftTaskProvider";
+import { packageName } from "../../utilities/tasks";
 import { executeTaskWithUI } from "../utilities";
 
 /**
@@ -22,8 +24,12 @@ import { executeTaskWithUI } from "../utilities";
  * @param identifier Identifier of dependency we want to edit
  * @param ctx workspace context
  */
-export async function editDependency(identifier: string, ctx: WorkspaceContext) {
-    const currentFolder = ctx.currentFolder;
+export async function editDependency(
+    identifier: string,
+    ctx: WorkspaceContext,
+    folder: FolderContext | undefined
+) {
+    const currentFolder = folder ?? ctx.currentFolder;
     if (!currentFolder) {
         return;
     }
@@ -34,7 +40,7 @@ export async function editDependency(identifier: string, ctx: WorkspaceContext) 
         {
             scope: currentFolder.workspaceFolder,
             cwd: currentFolder.folder,
-            prefix: currentFolder.name,
+            packageName: packageName(currentFolder),
         },
         currentFolder.toolchain
     );

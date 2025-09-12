@@ -11,56 +11,54 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import { expect } from "chai";
-import { beforeEach, afterEach } from "mocha";
-import * as vscode from "vscode";
+import { afterEach, beforeEach } from "mocha";
 import * as path from "path";
+import * as vscode from "vscode";
+
+import { WorkspaceContext } from "@src/WorkspaceContext";
+import { Commands } from "@src/commands";
+import { createBuildAllTask } from "@src/tasks/SwiftTaskProvider";
 import {
-    ProjectPanelProvider,
-    PackageNode,
     FileNode,
+    PackageNode,
+    ProjectPanelProvider,
     TreeNode,
-} from "../../../src/ui/ProjectPanelProvider";
-import { executeTaskAndWaitForResult, waitForNoRunningTasks } from "../../utilities/tasks";
-import { getBuildAllTask, SwiftTask } from "../../../src/tasks/SwiftTaskProvider";
+} from "@src/ui/ProjectPanelProvider";
+import { wait } from "@src/utilities/utilities";
+import { Version } from "@src/utilities/version";
+
 import { testAssetPath } from "../../fixtures";
+import { tag } from "../../tags";
+import { executeTaskAndWaitForResult, waitForNoRunningTasks } from "../../utilities/tasks";
 import {
     activateExtensionForSuite,
     folderInRootWorkspace,
     updateSettings,
 } from "../utilities/testutilities";
-import contextKeys from "../../../src/contextKeys";
-import { WorkspaceContext } from "../../../src/WorkspaceContext";
-import { Version } from "../../../src/utilities/version";
-import { wait } from "../../../src/utilities/utilities";
-import { SwiftOutputChannel } from "../../../src/ui/SwiftOutputChannel";
-import { Commands } from "../../../src/commands";
 
-suite("ProjectPanelProvider Test Suite", function () {
+tag("medium").suite("ProjectPanelProvider Test Suite", function () {
     let workspaceContext: WorkspaceContext;
     let treeProvider: ProjectPanelProvider;
-    this.timeout(5 * 60 * 1000); // Allow up to 5 minutes to build
 
     activateExtensionForSuite({
         async setup(ctx) {
             workspaceContext = ctx;
-            await waitForNoRunningTasks();
             const folderContext = await folderInRootWorkspace("targets", workspaceContext);
             await vscode.workspace.openTextDocument(
                 path.join(folderContext.folder.fsPath, "Package.swift")
             );
-            const buildAllTask = await getBuildAllTask(folderContext);
-            buildAllTask.definition.dontTriggerTestDiscovery = true;
-            await executeTaskAndWaitForResult(buildAllTask as SwiftTask);
-            const outputChannel = new SwiftOutputChannel("ProjectPanelProvider.tests");
-            await folderContext.loadSwiftPlugins(outputChannel);
-            expect(outputChannel.logs.length).to.equal(0, `Expected no output channel logs`);
+            const logger = await ctx.loggerFactory.temp("ProjectPanelProvider.tests");
+            await folderContext.loadSwiftPlugins(logger);
+            expect(logger.logs.length).to.equal(0, `Expected no output channel logs`);
             treeProvider = new ProjectPanelProvider(workspaceContext);
             await workspaceContext.focusFolder(folderContext);
+            const buildAllTask = await createBuildAllTask(folderContext);
+            buildAllTask.definition.dontTriggerTestDiscovery = true;
+            await executeTaskAndWaitForResult(buildAllTask);
         },
         async teardown() {
-            contextKeys.flatDependenciesList = false;
+            workspaceContext.contextKeys.flatDependenciesList = false;
             treeProvider.dispose();
         },
         testAssets: ["targets"],
@@ -85,13 +83,26 @@ suite("ProjectPanelProvider Test Suite", function () {
             () => treeProvider.getChildren(),
             commands => {
                 const commandNames = commands.map(n => n.name);
-                expect(commandNames).to.deep.equal([
-                    "Dependencies",
-                    "Targets",
-                    "Tasks",
-                    "Snippets",
-                    "Commands",
-                ]);
+                // There is a bug in 5.9 where if you have a build tool plugin and a
+                // command plugin the command plugins do not get returned from `swift package plugin list`.
+                if (
+                    workspaceContext.globalToolchain.swiftVersion.isLessThan(new Version(5, 10, 0))
+                ) {
+                    expect(commandNames).to.deep.equal([
+                        "Dependencies",
+                        "Targets",
+                        "Tasks",
+                        "Snippets",
+                    ]);
+                } else {
+                    expect(commandNames).to.deep.equal([
+                        "Dependencies",
+                        "Targets",
+                        "Tasks",
+                        "Snippets",
+                        "Commands",
+                    ]);
+                }
             }
         );
     });
@@ -106,14 +117,46 @@ suite("ProjectPanelProvider Test Suite", function () {
                         targetNames,
                         `Expected to find dependencies target, but instead items were ${targetNames}`
                     ).to.deep.equal([
+                        "BuildToolExecutableTarget",
                         "ExecutableTarget",
                         "LibraryTarget",
+                        "BuildToolPlugin",
                         "PluginTarget",
                         "AnotherTests",
                         "TargetsTests",
                     ]);
                 }
             );
+        });
+
+        test("Shows files generated by build tool plugin", async function () {
+            if (process.platform === "win32") {
+                this.skip();
+            }
+
+            const children = await getHeaderChildren("Targets");
+            const target = children.find(n => n.name === "LibraryTarget") as PackageNode;
+            expect(
+                target,
+                `Expected to find LibraryTarget, but instead items were ${children.map(n => n.name)}`
+            ).to.not.be.undefined;
+            const generatedFilesHeaders = await target.getChildren();
+            const generatedFiles = generatedFilesHeaders.find(
+                n => n.name === "BuildToolPlugin - Generated Files"
+            ) as PackageNode;
+            const generatedFilesChildren = await generatedFiles.getChildren();
+            const file = generatedFilesChildren.find(n => n.name === "Foo.swift") as FileNode;
+            expect(
+                file,
+                `Expected to find Foo.swift, but instead items were ${generatedFilesChildren.map(n => n.name)}`
+            ).to.not.be.undefined;
+            const folder = generatedFilesChildren.find(n => n.name === "Bar") as FileNode;
+            const folderChildren = await folder.getChildren();
+            const folderFile = folderChildren.find(n => n.name === "Baz.swift") as FileNode;
+            expect(
+                folderFile,
+                `Expected to find Foo.swift, but instead items were ${folderChildren.map(n => n.name)}`
+            ).to.not.be.undefined;
         });
     });
 
@@ -146,7 +189,13 @@ suite("ProjectPanelProvider Test Suite", function () {
             expect(dep).to.not.be.undefined;
         });
 
-        test("Executes a task", async () => {
+        test("Executes a task", async function () {
+            if (
+                process.platform === "win32" &&
+                workspaceContext.globalToolchain.swiftVersion.isLessThan(new Version(5, 10, 0))
+            ) {
+                this.skip();
+            }
             const task = await getBuildAllTask();
             expect(task).to.not.be.undefined;
             const treeItem = task?.toTreeItem();
@@ -176,7 +225,7 @@ suite("ProjectPanelProvider Test Suite", function () {
             if (
                 process.platform === "win32" &&
                 workspaceContext.globalToolchain.swiftVersion.isLessThanOrEqual(
-                    new Version(5, 9, 0)
+                    new Version(5, 10, 0)
                 )
             ) {
                 this.skip();
@@ -201,10 +250,11 @@ suite("ProjectPanelProvider Test Suite", function () {
     suite("Commands", () => {
         test("Includes commands", async function () {
             if (
-                process.platform === "win32" &&
-                workspaceContext.globalToolchain.swiftVersion.isLessThanOrEqual(
-                    new Version(6, 0, 0)
-                )
+                (process.platform === "win32" &&
+                    workspaceContext.globalToolchain.swiftVersion.isLessThanOrEqual(
+                        new Version(6, 0, 0)
+                    )) ||
+                workspaceContext.globalToolchain.swiftVersion.isLessThan(new Version(5, 10, 0))
             ) {
                 this.skip();
             }
@@ -220,10 +270,11 @@ suite("ProjectPanelProvider Test Suite", function () {
 
         test("Executes a command", async function () {
             if (
-                process.platform === "win32" &&
-                workspaceContext.globalToolchain.swiftVersion.isLessThanOrEqual(
-                    new Version(6, 0, 0)
-                )
+                (process.platform === "win32" &&
+                    workspaceContext.globalToolchain.swiftVersion.isLessThanOrEqual(
+                        new Version(6, 0, 0)
+                    )) ||
+                workspaceContext.globalToolchain.swiftVersion.isLessThan(new Version(5, 10, 0))
             ) {
                 this.skip();
             }
@@ -250,7 +301,7 @@ suite("ProjectPanelProvider Test Suite", function () {
 
     suite("Dependencies", () => {
         test("Includes remote dependency", async () => {
-            contextKeys.flatDependenciesList = false;
+            workspaceContext.contextKeys.flatDependenciesList = false;
             const items = await getHeaderChildren("Dependencies");
             const dep = items.find(n => n.name === "swift-markdown") as PackageNode;
             expect(dep, `${JSON.stringify(items, null, 2)}`).to.not.be.undefined;
@@ -273,7 +324,7 @@ suite("ProjectPanelProvider Test Suite", function () {
         });
 
         test("Lists local dependency file structure", async () => {
-            contextKeys.flatDependenciesList = false;
+            workspaceContext.contextKeys.flatDependenciesList = false;
             const children = await getHeaderChildren("Dependencies");
             const dep = children.find(n => n.name === "defaultpackage") as PackageNode;
             expect(
@@ -307,7 +358,7 @@ suite("ProjectPanelProvider Test Suite", function () {
         });
 
         test("Lists remote dependency file structure", async () => {
-            contextKeys.flatDependenciesList = false;
+            workspaceContext.contextKeys.flatDependenciesList = false;
             const children = await getHeaderChildren("Dependencies");
             const dep = children.find(n => n.name === "swift-markdown") as PackageNode;
             expect(dep, `${JSON.stringify(children, null, 2)}`).to.not.be.undefined;
@@ -333,7 +384,7 @@ suite("ProjectPanelProvider Test Suite", function () {
         });
 
         test("Shows a flat dependency list", async () => {
-            contextKeys.flatDependenciesList = true;
+            workspaceContext.contextKeys.flatDependenciesList = true;
             const items = await getHeaderChildren("Dependencies");
             expect(items.length).to.equal(3);
             expect(items.find(n => n.name === "swift-markdown")).to.not.be.undefined;
@@ -342,7 +393,7 @@ suite("ProjectPanelProvider Test Suite", function () {
         });
 
         test("Shows a nested dependency list", async () => {
-            contextKeys.flatDependenciesList = false;
+            workspaceContext.contextKeys.flatDependenciesList = false;
             const items = await getHeaderChildren("Dependencies");
             expect(items.length).to.equal(2);
             expect(items.find(n => n.name === "swift-markdown")).to.not.be.undefined;
@@ -356,6 +407,38 @@ suite("ProjectPanelProvider Test Suite", function () {
             const children = await treeProvider.getChildren();
             const errorNode = children.find(n => n.name === "Error Parsing Package.swift");
             expect(errorNode).to.not.be.undefined;
+        });
+
+        suite("Excluded files", () => {
+            let resetSettings: (() => Promise<void>) | undefined;
+            beforeEach(async function () {
+                resetSettings = await updateSettings({
+                    "files.exclude": { "**/*.swift": true, "**/*.txt": false },
+                    "swift.excludePathsFromPackageDependencies": ["**/*.md"],
+                });
+            });
+
+            test("Excludes files based on settings", async () => {
+                workspaceContext.contextKeys.flatDependenciesList = false;
+                const children = await getHeaderChildren("Dependencies");
+                const dep = children.find(n => n.name === "swift-markdown") as PackageNode;
+                expect(dep, `${JSON.stringify(children, null, 2)}`).to.not.be.undefined;
+
+                const folders = await treeProvider.getChildren(dep);
+                const manifest = folders.find(n => n.name === "Package.swift") as FileNode;
+                expect(manifest, "Package.swift was not found").to.be.undefined;
+                const readme = folders.find(n => n.name === "README.md") as FileNode;
+                expect(readme, "README.md was not found").to.be.undefined;
+                const licence = folders.find(n => n.name === "LICENSE.txt") as FileNode;
+                expect(licence, "LICENSE.txt was not found").to.not.be.undefined;
+            });
+
+            afterEach(async () => {
+                if (resetSettings) {
+                    await resetSettings();
+                    resetSettings = undefined;
+                }
+            });
         });
     });
 

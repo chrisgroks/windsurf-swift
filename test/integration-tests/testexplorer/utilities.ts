@@ -11,21 +11,23 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
 import * as assert from "assert";
-import { reduceTestItemChildren } from "../../../src/TestExplorer/TestUtils";
-import { TestRunProxy } from "../../../src/TestExplorer/TestRunner";
-import { TestExplorer } from "../../../src/TestExplorer/TestExplorer";
-import { TestKind } from "../../../src/TestExplorer/TestKind";
-import { WorkspaceContext } from "../../../src/WorkspaceContext";
+import * as vscode from "vscode";
+
+import { TestExplorer } from "@src/TestExplorer/TestExplorer";
+import { TestKind } from "@src/TestExplorer/TestKind";
+import { TestRunProxy } from "@src/TestExplorer/TestRunner";
+import { reduceTestItemChildren } from "@src/TestExplorer/TestUtils";
+import { WorkspaceContext } from "@src/WorkspaceContext";
+
 import { testAssetUri } from "../../fixtures";
 import {
+    SettingsMap,
     activateExtension,
     deactivateExtension,
-    SettingsMap,
     updateSettings,
 } from "../utilities/testutilities";
+
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import stripAnsi = require("strip-ansi");
 
@@ -81,6 +83,19 @@ export function testExplorerFor(
 type TestHierarchy = string | TestHierarchy[];
 
 /**
+ * Builds a tree of text items from a TestItemCollection
+ */
+export const buildStateFromController = (items: vscode.TestItemCollection): TestHierarchy =>
+    reduceTestItemChildren(
+        items,
+        (acc, item) => {
+            const children = buildStateFromController(item.children);
+            return [...acc, item.label, ...(children.length ? [children] : [])];
+        },
+        [] as TestHierarchy
+    );
+
+/**
  * Asserts that the test item hierarchy matches the description provided by a collection
  * of `TestControllerState`s.
  */
@@ -88,16 +103,6 @@ export function assertTestControllerHierarchy(
     controller: vscode.TestController,
     state: TestHierarchy
 ) {
-    const buildStateFromController = (items: vscode.TestItemCollection): TestHierarchy =>
-        reduceTestItemChildren(
-            items,
-            (acc, item) => {
-                const children = buildStateFromController(item.children);
-                return [...acc, item.label, ...(children.length ? [children] : [])];
-            },
-            [] as TestHierarchy
-        );
-
     assert.deepEqual(
         buildStateFromController(controller.items),
         state,
@@ -145,6 +150,7 @@ export function assertTestResults(
         passed?: string[];
         skipped?: string[];
         errored?: string[];
+        enqueued?: string[];
         unknown?: number;
     }
 ) {
@@ -161,6 +167,9 @@ export function assertTestResults(
                 .sort(),
             skipped: testRun.runState.skipped.map(({ id }) => id).sort(),
             errored: testRun.runState.errored.map(({ id }) => id).sort(),
+            enqueued: Array.from(testRun.runState.enqueued)
+                .map(({ id }) => id)
+                .sort(),
             unknown: testRun.runState.unknown,
         },
         {
@@ -173,6 +182,7 @@ export function assertTestResults(
                 .sort(),
             skipped: (state.skipped ?? []).sort(),
             errored: (state.errored ?? []).sort(),
+            enqueued: (state.enqueued ?? []).sort(),
             unknown: 0,
         },
         `

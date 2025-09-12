@@ -11,12 +11,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
 import * as path from "path";
-import { showReloadExtensionNotification } from "./ReloadExtension";
-import { SwiftToolchain } from "../toolchain/toolchain";
+import * as vscode from "vscode";
+
+import { FolderContext } from "../FolderContext";
+import { Commands } from "../commands";
 import configuration from "../configuration";
+import { SwiftLogger } from "../logging/SwiftLogger";
+import { Swiftly } from "../toolchain/swiftly";
+import { SwiftToolchain } from "../toolchain/toolchain";
+import { showReloadExtensionNotification } from "./ReloadExtension";
 
 /**
  * Open the installation page on Swift.org
@@ -28,7 +32,7 @@ export async function downloadToolchain() {
             "Select Toolchain"
         );
         if (selected === "Select Toolchain") {
-            await vscode.commands.executeCommand("swift.selectToolchain");
+            await selectToolchain();
         }
     }
 }
@@ -43,7 +47,7 @@ export async function installSwiftly() {
             "Select Toolchain"
         );
         if (selected === "Select Toolchain") {
-            await vscode.commands.executeCommand("swift.selectToolchain");
+            await selectToolchain();
         }
     }
 }
@@ -68,55 +72,71 @@ export async function selectToolchainFolder() {
 
 /**
  * Displays an error notification to the user that toolchain discovery failed.
+ * @returns true if the user made a selection (and potentially updated toolchain settings), false if they dismissed the dialog
  */
-export async function showToolchainError(): Promise<void> {
+export async function showToolchainError(folder?: vscode.Uri): Promise<boolean> {
     let selected: "Remove From Settings" | "Select Toolchain" | undefined;
+    const folderName = folder ? `${FolderContext.uriName(folder)}: ` : "";
     if (configuration.path) {
         selected = await vscode.window.showErrorMessage(
-            `The Swift executable at "${configuration.path}" either could not be found or failed to launch. Please select a new toolchain.`,
+            `${folderName}The Swift executable at "${configuration.path}" either could not be found or failed to launch. Please select a new toolchain.`,
             "Remove From Settings",
             "Select Toolchain"
         );
     } else {
         selected = await vscode.window.showErrorMessage(
-            "Unable to automatically discover your Swift toolchain. Either install a toolchain from Swift.org or provide the path to an existing toolchain.",
+            `${folderName}Unable to automatically discover your Swift toolchain. Either install a toolchain from Swift.org or provide the path to an existing toolchain.`,
             "Select Toolchain"
         );
     }
 
     if (selected === "Remove From Settings") {
         await removeToolchainPath();
+        return true;
     } else if (selected === "Select Toolchain") {
-        await vscode.commands.executeCommand("swift.selectToolchain");
+        await selectToolchain();
+        return true;
     }
+    return false;
+}
+
+export async function selectToolchain() {
+    await vscode.commands.executeCommand(Commands.SELECT_TOOLCHAIN);
 }
 
 /** A {@link vscode.QuickPickItem} that contains the path to an installed Swift toolchain */
-type SwiftToolchainItem = PublicSwiftToolchainItem | XcodeToolchainItem;
+type SwiftToolchainItem = PublicSwiftToolchainItem | XcodeToolchainItem | SwiftlyToolchainItem;
 
 /** Common properties for a {@link vscode.QuickPickItem} that represents a Swift toolchain */
 interface BaseSwiftToolchainItem extends vscode.QuickPickItem {
     type: "toolchain";
-    toolchainPath: string;
-    swiftFolderPath: string;
     onDidSelect?(): Promise<void>;
 }
 
 /** A {@link vscode.QuickPickItem} for a Swift toolchain that has been installed manually */
 interface PublicSwiftToolchainItem extends BaseSwiftToolchainItem {
-    category: "public" | "swiftly";
+    category: "public";
+    toolchainPath: string;
+    swiftFolderPath: string;
 }
 
 /** A {@link vscode.QuickPickItem} for a Swift toolchain provided by an installed Xcode application */
 interface XcodeToolchainItem extends BaseSwiftToolchainItem {
     category: "xcode";
     xcodePath: string;
+    toolchainPath: string;
+    swiftFolderPath: string;
 }
 
 /** A {@link vscode.QuickPickItem} that performs an action for the user */
 interface ActionItem extends vscode.QuickPickItem {
     type: "action";
     run(): Promise<void>;
+}
+
+interface SwiftlyToolchainItem extends BaseSwiftToolchainItem {
+    category: "swiftly";
+    version: string;
 }
 
 /** A {@link vscode.QuickPickItem} that separates items in the UI */
@@ -136,38 +156,39 @@ type SelectToolchainItem = SwiftToolchainItem | ActionItem | SeparatorItem;
 /**
  * Retrieves all {@link SelectToolchainItem} that are available on the system.
  *
- * @param ctx the {@link WorkspaceContext}
  * @returns an array of {@link SelectToolchainItem}
+ * @param activeToolchain
+ * @param logger
+ * @param cwd
  */
 async function getQuickPickItems(
-    activeToolchain: SwiftToolchain | undefined
+    activeToolchain: SwiftToolchain | undefined,
+    logger: SwiftLogger,
+    cwd?: vscode.Uri
 ): Promise<SelectToolchainItem[]> {
     // Find any Xcode installations on the system
-    const xcodes = (await SwiftToolchain.findXcodeInstalls())
-        .reverse()
-        .map<SwiftToolchainItem>(xcodePath => {
-            const toolchainPath = path.join(
-                xcodePath,
-                "Contents",
-                "Developer",
-                "Toolchains",
-                "XcodeDefault.xctoolchain",
-                "usr"
-            );
-            return {
-                type: "toolchain",
-                category: "xcode",
-                label: path.basename(xcodePath, ".app"),
-                detail: xcodePath,
-                xcodePath,
-                toolchainPath,
-                swiftFolderPath: path.join(toolchainPath, "bin"),
-            };
-        });
+    const xcodes = (await SwiftToolchain.findXcodeInstalls()).map<SwiftToolchainItem>(xcodePath => {
+        const toolchainPath = path.join(
+            xcodePath,
+            "Contents",
+            "Developer",
+            "Toolchains",
+            "XcodeDefault.xctoolchain",
+            "usr"
+        );
+        return {
+            type: "toolchain",
+            category: "xcode",
+            label: path.basename(xcodePath, ".app"),
+            detail: xcodePath,
+            xcodePath,
+            toolchainPath,
+            swiftFolderPath: path.join(toolchainPath, "bin"),
+        };
+    });
     // Find any public Swift toolchains on the system
-    const toolchains = (await SwiftToolchain.getToolchainInstalls())
-        .reverse()
-        .map<SwiftToolchainItem>(toolchainPath => {
+    const toolchains = (await SwiftToolchain.getToolchainInstalls()).map<SwiftToolchainItem>(
+        toolchainPath => {
             const result: SwiftToolchainItem = {
                 type: "toolchain",
                 category: "public",
@@ -185,27 +206,57 @@ async function getQuickPickItems(
                 };
             }
             return result;
-        });
+        }
+    );
+
+    // Sort toolchains by label (alphabetically)
+    const sortedToolchains = toolchains.sort((a, b) => b.label.localeCompare(a.label));
+
     // Find any Swift toolchains installed via Swiftly
-    const swiftlyToolchains = (await SwiftToolchain.getSwiftlyToolchainInstalls())
-        .reverse()
-        .map<SwiftToolchainItem>(toolchainPath => ({
-            type: "toolchain",
-            category: "swiftly",
-            label: path.basename(toolchainPath),
-            detail: toolchainPath,
-            toolchainPath: path.join(toolchainPath, "usr"),
-            swiftFolderPath: path.join(toolchainPath, "usr", "bin"),
-        }));
-    // Mark which toolchain is being actively used
+    const swiftlyToolchains = (
+        await Swiftly.listAvailableToolchains(logger)
+    ).map<SwiftlyToolchainItem>(toolchainPath => ({
+        type: "toolchain",
+        label: path.basename(toolchainPath),
+        category: "swiftly",
+        version: path.basename(toolchainPath),
+        onDidSelect: async () => {
+            try {
+                await Swiftly.use(toolchainPath);
+                void showReloadExtensionNotification(
+                    "Changing the Swift path requires Visual Studio Code be reloaded."
+                );
+            } catch (error) {
+                void vscode.window.showErrorMessage(`Failed to switch Swiftly toolchain: ${error}`);
+            }
+        },
+    }));
+
     if (activeToolchain) {
-        const toolchainInUse = [...xcodes, ...toolchains, ...swiftlyToolchains].find(toolchain => {
-            return toolchain.toolchainPath === activeToolchain.toolchainPath;
-        });
+        const currentSwiftlyVersion = activeToolchain.isSwiftlyManaged
+            ? await Swiftly.inUseVersion("swiftly", cwd)
+            : undefined;
+        const toolchainInUse = [...xcodes, ...sortedToolchains, ...swiftlyToolchains].find(
+            toolchain => {
+                if (currentSwiftlyVersion) {
+                    if (toolchain.category !== "swiftly") {
+                        return false;
+                    }
+
+                    // For Swiftly toolchains, check if the label matches the active toolchain version
+                    return currentSwiftlyVersion === toolchain.label;
+                }
+                // For non-Swiftly toolchains, check if the toolchain path matches
+                return (
+                    (toolchain as PublicSwiftToolchainItem | XcodeToolchainItem).toolchainPath ===
+                    activeToolchain.toolchainPath
+                );
+            }
+        );
         if (toolchainInUse) {
             toolchainInUse.description = "$(check) in use";
         } else {
-            toolchains.splice(0, 0, {
+            sortedToolchains.splice(0, 0, {
                 type: "toolchain",
                 category: "public",
                 label: `Swift ${activeToolchain.swiftVersion.toString()}`,
@@ -218,14 +269,37 @@ async function getQuickPickItems(
     }
     // Various actions that the user can perform (e.g. to install new toolchains)
     const actionItems: ActionItem[] = [];
-    if (process.platform === "linux") {
+    if (Swiftly.isSupported() && !(await Swiftly.isInstalled())) {
+        const platformName = process.platform === "linux" ? "Linux" : "macOS";
         actionItems.push({
             type: "action",
             label: "$(swift-icon) Install Swiftly for toolchain management...",
-            detail: "Install https://swiftlang.github.io/swiftly to manage your toolchains on Linux",
+            detail: `Install https://swiftlang.github.io/swiftly to manage your toolchains on ${platformName}`,
             run: installSwiftly,
         });
     }
+
+    // Add install Swiftly toolchain actions if Swiftly is installed
+    if (Swiftly.isSupported() && (await Swiftly.isInstalled())) {
+        actionItems.push({
+            type: "action",
+            label: "$(cloud-download) Install Swiftly toolchain...",
+            detail: "Install a Swift stable release toolchain via Swiftly",
+            run: async () => {
+                await vscode.commands.executeCommand(Commands.INSTALL_SWIFTLY_TOOLCHAIN);
+            },
+        });
+
+        actionItems.push({
+            type: "action",
+            label: "$(beaker) Install Swiftly snapshot toolchain...",
+            detail: "Install a Swift snapshot toolchain via Swiftly from development builds",
+            run: async () => {
+                await vscode.commands.executeCommand(Commands.INSTALL_SWIFTLY_SNAPSHOT_TOOLCHAIN);
+            },
+        });
+    }
+
     actionItems.push({
         type: "action",
         label: "$(cloud-download) Download from Swift.org...",
@@ -240,7 +314,9 @@ async function getQuickPickItems(
     });
     return [
         ...(xcodes.length > 0 ? [new SeparatorItem("Xcode"), ...xcodes] : []),
-        ...(toolchains.length > 0 ? [new SeparatorItem("toolchains"), ...toolchains] : []),
+        ...(sortedToolchains.length > 0
+            ? [new SeparatorItem("toolchains"), ...sortedToolchains]
+            : []),
         ...(swiftlyToolchains.length > 0
             ? [new SeparatorItem("swiftly"), ...swiftlyToolchains]
             : []),
@@ -254,11 +330,17 @@ async function getQuickPickItems(
  * with the user's selection.
  *
  * @param activeToolchain the {@link WorkspaceContext}
+ * @param logger
+ * @param cwd
  */
-export async function showToolchainSelectionQuickPick(activeToolchain: SwiftToolchain | undefined) {
+export async function showToolchainSelectionQuickPick(
+    activeToolchain: SwiftToolchain | undefined,
+    logger: SwiftLogger,
+    cwd?: vscode.Uri
+) {
     let xcodePaths: string[] = [];
     const selected = await vscode.window.showQuickPick<SelectToolchainItem>(
-        getQuickPickItems(activeToolchain).then(result => {
+        getQuickPickItems(activeToolchain, logger, cwd).then(result => {
             xcodePaths = result
                 .filter((i): i is XcodeToolchainItem => "category" in i && i.category === "xcode")
                 .map(xcode => xcode.xcodePath);
@@ -296,8 +378,17 @@ export async function showToolchainSelectionQuickPick(activeToolchain: SwiftTool
                 });
             }
         }
-        // Update the toolchain path
-        const isUpdated = await setToolchainPath(selected.swiftFolderPath, developerDir);
+        // Update the toolchain path`
+        let swiftPath: string | undefined;
+
+        if (selected.category === "swiftly") {
+            swiftPath = undefined;
+        } else {
+            // For non-Swiftly toolchains, use the swiftFolderPath
+            swiftPath = (selected as PublicSwiftToolchainItem | XcodeToolchainItem).swiftFolderPath;
+        }
+
+        const isUpdated = await setToolchainPath(swiftPath, developerDir);
         if (isUpdated && selected.onDidSelect) {
             await selected.onDidSelect();
         }
@@ -351,7 +442,7 @@ async function showDeveloperDirQuickPick(xcodePaths: string[]): Promise<string |
 /**
  * Delete all set Swift path settings.
  */
-async function removeToolchainPath() {
+export async function removeToolchainPath() {
     const swiftSettings = vscode.workspace.getConfiguration("swift");
     const swiftEnvironmentSettings = swiftSettings.inspect("swiftEnvironmentVariables");
     if (swiftEnvironmentSettings?.globalValue) {

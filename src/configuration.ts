@@ -11,12 +11,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
 import * as os from "os";
 import * as path from "path";
-import { showReloadExtensionNotification } from "./ui/ReloadExtension";
+import * as vscode from "vscode";
+
 import { WorkspaceContext } from "./WorkspaceContext";
+import { showReloadExtensionNotification } from "./ui/ReloadExtension";
 
 export type DebugAdapters = "auto" | "lldb-dap" | "CodeLLDB";
 export type SetupCodeLLDBOptions =
@@ -39,6 +39,7 @@ export type DiagnosticCollectionOptions =
     | "keepSourceKit"
     | "keepAll";
 export type DiagnosticStyle = "default" | "llvm" | "swift";
+export type ValidCodeLens = "run" | "debug" | "coverage";
 
 /** sourcekit-lsp configuration */
 export interface LSPConfiguration {
@@ -290,6 +291,16 @@ const configuration = {
             .get<string[]>("excludeFromCodeCoverage", [])
             .map(substituteVariablesInString);
     },
+    /** Whether to show inline code lenses for running and debugging tests. */
+    get showTestCodeLenses(): boolean | ValidCodeLens[] {
+        return vscode.workspace
+            .getConfiguration("swift")
+            .get<boolean | ValidCodeLens[]>("showTestCodeLenses", true);
+    },
+    /** Whether to record the duration of tests in the Test Explorer. */
+    get recordTestDuration(): boolean {
+        return vscode.workspace.getConfiguration("swift").get<boolean>("recordTestDuration", true);
+    },
     /** Files and directories to exclude from the Package Dependencies view. */
     get excludePathsFromPackageDependencies(): string[] {
         return vscode.workspace
@@ -383,13 +394,19 @@ const configuration = {
     get diagnosticsStyle(): DiagnosticStyle {
         return vscode.workspace
             .getConfiguration("swift")
-            .get<DiagnosticStyle>("diagnosticsStyle", "llvm");
+            .get<DiagnosticStyle>("diagnosticsStyle", "default");
     },
     /** where to show the build progress for the running task */
     get showBuildStatus(): ShowBuildStatusOptions {
         return vscode.workspace
             .getConfiguration("swift")
             .get<ShowBuildStatusOptions>("showBuildStatus", "swiftStatus");
+    },
+    /** create build tasks for the library products of the package(s) */
+    get createTasksForLibraryProducts(): boolean {
+        return vscode.workspace
+            .getConfiguration("swift")
+            .get<boolean>("createTasksForLibraryProducts", false);
     },
     /** background compilation */
     get backgroundCompilation(): boolean {
@@ -483,11 +500,47 @@ const configuration = {
     get disableSandbox(): boolean {
         return vscode.workspace.getConfiguration("swift").get<boolean>("disableSandbox", false);
     },
+    /** Workspace folder glob patterns to exclude */
+    get excludePathsFromActivation(): Record<string, boolean> {
+        return vscode.workspace
+            .getConfiguration("swift")
+            .get<Record<string, boolean>>("excludePathsFromActivation", {});
+    },
+    get lspConfigurationBranch(): string {
+        return vscode.workspace.getConfiguration("swift").get<string>("lspConfigurationBranch", "");
+    },
+    get checkLspConfigurationSchema(): boolean {
+        return vscode.workspace
+            .getConfiguration("swift")
+            .get<boolean>("checkLspConfigurationSchema", true);
+    },
+    set checkLspConfigurationSchema(value: boolean) {
+        void vscode.workspace
+            .getConfiguration("swift")
+            .update("checkLspConfigurationSchema", value)
+            .then(() => {
+                /* Put in worker queue */
+            });
+    },
+    get outputChannelLogLevel(): string {
+        return vscode.workspace.getConfiguration("swift").get("outputChannelLogLevel", "info");
+    },
+    parameterHintsEnabled(documentUri: vscode.Uri): boolean {
+        const enabled = vscode.workspace
+            .getConfiguration("editor.parameterHints", {
+                uri: documentUri,
+                languageId: "swift",
+            })
+            .get<boolean>("enabled");
+
+        return enabled === true;
+    },
 };
 
 const vsCodeVariableRegex = new RegExp(/\$\{(.+?)\}/g);
 export function substituteVariablesInString(val: string): string {
-    return val.replace(vsCodeVariableRegex, (substring: string, varName: string) =>
+    // Fallback to "" incase someone explicitly sets to null
+    return (val || "").replace(vsCodeVariableRegex, (substring: string, varName: string) =>
         typeof varName === "string" ? computeVscodeVar(varName) || substring : substring
     );
 }
@@ -508,6 +561,13 @@ function computeVscodeVar(varName: string): string | null {
     };
 
     const file = () => vscode.window.activeTextEditor?.document?.uri?.fsPath || "";
+
+    const regex = /workspaceFolder:(.*)/gm;
+    const match = regex.exec(varName);
+    if (match) {
+        const name = match[1];
+        return vscode.workspace.workspaceFolders?.find(f => f.name === name)?.uri.fsPath ?? null;
+    }
 
     // https://code.visualstudio.com/docs/editor/variables-reference
     // Variables to be substituted should be added here.

@@ -11,11 +11,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as vscode from "vscode";
+
 import { FolderContext } from "../../FolderContext";
-import { createSwiftTask, SwiftTaskProvider } from "../../tasks/SwiftTaskProvider";
 import { WorkspaceContext } from "../../WorkspaceContext";
+import { SwiftTaskProvider, createSwiftTask } from "../../tasks/SwiftTaskProvider";
+import { packageName } from "../../utilities/tasks";
 import { executeTaskWithUI, updateAfterError } from "../utilities";
 
 /**
@@ -43,7 +44,7 @@ export async function resolveFolderDependencies(
         {
             cwd: folderContext.folder,
             scope: folderContext.workspaceFolder,
-            prefix: folderContext.name,
+            packageName: packageName(folderContext),
             presentationOptions: { reveal: vscode.TaskRevealKind.Silent },
         },
         folderContext.toolchain

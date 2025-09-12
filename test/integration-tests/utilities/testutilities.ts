@@ -11,31 +11,33 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
 import * as assert from "assert";
 import * as mocha from "mocha";
-import { Api } from "../../../src/extension";
-import { testAssetUri } from "../../fixtures";
-import { WorkspaceContext } from "../../../src/WorkspaceContext";
-import { FolderContext } from "../../../src/FolderContext";
-import { waitForNoRunningTasks } from "../../utilities/tasks";
-import { closeAllEditors } from "../../utilities/commands";
 import { isDeepStrictEqual } from "util";
-import { Version } from "../../../src/utilities/version";
-import { SwiftOutputChannel } from "../../../src/ui/SwiftOutputChannel";
-import configuration from "../../../src/configuration";
-import { resetBuildAllTaskCache } from "../../../src/tasks/SwiftTaskProvider";
+import * as vscode from "vscode";
 
-function getRootWorkspaceFolder(): vscode.WorkspaceFolder {
+import { FolderContext } from "@src/FolderContext";
+import { FolderOperation, WorkspaceContext } from "@src/WorkspaceContext";
+import configuration from "@src/configuration";
+import { Api } from "@src/extension";
+import { SwiftLogger } from "@src/logging/SwiftLogger";
+import { buildAllTaskName, resetBuildAllTaskCache } from "@src/tasks/SwiftTaskProvider";
+import { Extension } from "@src/utilities/extensions";
+import { Version } from "@src/utilities/version";
+
+import { testAssetPath, testAssetUri } from "../../fixtures";
+import { closeAllEditors } from "../../utilities/commands";
+import { waitForNoRunningTasks } from "../../utilities/tasks";
+
+export function getRootWorkspaceFolder(): vscode.WorkspaceFolder {
     const result = vscode.workspace.workspaceFolders?.at(0);
     assert(result, "No workspace folders were opened for the tests to use");
     return result;
 }
 
-function printLogs(outputChannel: SwiftOutputChannel, message: string) {
+function printLogs(logger: SwiftLogger, message: string) {
     console.error(`${message}, captured logs are:`);
-    outputChannel.logs.map(log => console.log(log));
+    logger.logs.map(log => console.log(log));
     console.log("======== END OF LOGS ========\n\n");
 }
 
@@ -116,7 +118,7 @@ const extensionBootstrapper = (() => {
                 // Mocha will throw an error to break out of a test if `.skip` is used.
                 if (error.message?.indexOf("sync skip;") === -1) {
                     console.error(`Error during test/suite setup, captured logs are:`);
-                    workspaceContext.outputChannel.logs.map(log => console.error(log));
+                    workspaceContext.logger.logs.map(log => console.error(log));
                     console.log("======== END OF LOGS ========\n\n");
                 }
                 throw error;
@@ -125,19 +127,14 @@ const extensionBootstrapper = (() => {
 
         mocha.beforeEach(function () {
             if (this.currentTest && activatedAPI) {
-                activatedAPI.outputChannel.clear();
-                activatedAPI.outputChannel.appendLine(
-                    `Starting test: ${testTitle(this.currentTest)}`
-                );
+                activatedAPI.logger.clear();
+                activatedAPI.logger.info(`Starting test: ${testTitle(this.currentTest)}`);
             }
         });
 
         mocha.afterEach(async function () {
             if (this.currentTest && activatedAPI && this.currentTest.isFailed()) {
-                printLogs(
-                    activatedAPI.outputChannel,
-                    `Test failed: ${testTitle(this.currentTest)}`
-                );
+                printLogs(activatedAPI.logger, `Test failed: ${testTitle(this.currentTest)}`);
             }
             if (vscode.debug.activeDebugSession) {
                 await vscode.debug.stopDebugging(vscode.debug.activeDebugSession);
@@ -156,7 +153,7 @@ const extensionBootstrapper = (() => {
                 }
             } catch (error) {
                 if (workspaceContext) {
-                    printLogs(workspaceContext.outputChannel, "Error during test/suite teardown");
+                    printLogs(workspaceContext.logger, "Error during test/suite teardown");
                 }
                 // We always want to restore settings and deactivate the extension even if the
                 // user supplied teardown fails. That way we have the best chance at not causing
@@ -202,7 +199,7 @@ const extensionBootstrapper = (() => {
             // `vscode.extensions.getExtension<Api>("swiftlang.swift-vscode")` once.
             // Subsequent activations must be done through the returned API object.
             if (!activator) {
-                for (const depId of ["vadimcn.vscode-lldb", "llvm-vs-code-extensions.lldb-dap"]) {
+                for (const depId of [Extension.CODELLDB, Extension.LLDBDAP]) {
                     const dep = vscode.extensions.getExtension<Api>(depId);
                     if (!dep) {
                         throw new Error(`Unable to find extension "${depId}"`);
@@ -223,17 +220,46 @@ const extensionBootstrapper = (() => {
 
             if (!workspaceContext) {
                 printLogs(
-                    activatedAPI.outputChannel,
+                    activatedAPI.logger,
                     "Error during test/suite setup, workspace context could not be created"
                 );
                 throw new Error("Extension did not activate. Workspace context is not available.");
             }
 
             // Add assets required for the suite/test to the workspace.
-            const workspaceFolder = getRootWorkspaceFolder();
-            for (const asset of testAssets ?? []) {
-                const packageFolder = testAssetUri(asset);
-                await workspaceContext.addPackageFolder(packageFolder, workspaceFolder);
+            const expectedAssets = testAssets ?? ["defaultPackage"];
+            if (!vscode.workspace.workspaceFile) {
+                for (const asset of expectedAssets) {
+                    await folderInRootWorkspace(asset, workspaceContext);
+                }
+            } else if (expectedAssets.length > 0) {
+                await new Promise<void>(res => {
+                    const found: string[] = [];
+                    for (const f of workspaceContext.folders) {
+                        if (found.includes(f.name) || !expectedAssets.includes(f.name)) {
+                            continue;
+                        }
+                        found.push(f.name);
+                    }
+                    if (expectedAssets.length === found.length) {
+                        res();
+                        return;
+                    }
+                    const disposable = workspaceContext.onDidChangeFolders(e => {
+                        if (
+                            e.operation !== FolderOperation.add ||
+                            found.includes(e.folder!.name) ||
+                            !expectedAssets.includes(e.folder!.name)
+                        ) {
+                            return;
+                        }
+                        found.push(e.folder!.name);
+                        if (expectedAssets.length === found.length) {
+                            res();
+                            disposable.dispose();
+                        }
+                    });
+                });
             }
 
             return workspaceContext;
@@ -336,8 +362,23 @@ export const folderInRootWorkspace = async (
     if (!folder) {
         folder = await workspaceContext.addPackageFolder(testAssetUri(name), workspaceFolder);
     }
+    let i = 0;
+    while (i++ < 5) {
+        const tasks = await vscode.tasks.fetchTasks({ type: "swift" });
+        if (tasks.find(t => t.name === buildAllTaskName(folder, false))) {
+            break;
+        }
+        await new Promise(r => setTimeout(r, 5000));
+    }
     return folder;
 };
+
+export function findWorkspaceFolder(
+    name: string,
+    workspaceContext: WorkspaceContext
+): FolderContext | undefined {
+    return workspaceContext.folders.find(f => f.folder.fsPath === testAssetPath(name));
+}
 
 export type SettingsMap = { [key: string]: unknown };
 
@@ -386,10 +427,10 @@ export async function updateSettings(settings: SettingsMap): Promise<() => Promi
                 : settings[setting];
 
             while (
-                isDeepStrictEqual(
+                !isConfigurationSuperset(
                     vscode.workspace.getConfiguration(section, { languageId: "swift" }).get(name),
                     expected
-                ) === false
+                )
             ) {
                 // Not yet, wait a bit and try again.
                 await new Promise(resolve => setTimeout(resolve, 30));
@@ -416,4 +457,75 @@ function decomposeSettingName(setting: string): { section: string; name: string 
         throw new Error(`Invalid setting name: ${setting}, must be in the form swift.settingName`);
     }
     return { section, name };
+}
+
+/**
+ * Performs a deep comparison between a configuration value and an expected value.
+ * Supports superset comparisons for objects and arrays, and strict equality for primitives.
+ *
+ * @param configValue The configuration value to compare
+ * @param expected The expected value to compare against
+ * @returns true if the configuration value matches or is a superset of the expected value, false otherwise
+ */
+export function isConfigurationSuperset(configValue: unknown, expected: unknown): boolean {
+    // Handle null cases
+    if (configValue === null || expected === null) {
+        return configValue === expected;
+    }
+
+    // If both values are undefined, they are considered equal
+    if (configValue === undefined && expected === undefined) {
+        return true;
+    }
+
+    // If expected is undefined but configValue is not, they are not equal
+    if (expected === undefined) {
+        return false;
+    }
+
+    // If configValue is undefined but expected is not, they are not equal
+    if (configValue === undefined) {
+        return false;
+    }
+
+    // Use isDeepStrictEqual for primitive types
+    if (typeof configValue !== "object" || typeof expected !== "object") {
+        return isDeepStrictEqual(configValue, expected);
+    }
+
+    // Handle arrays
+    if (Array.isArray(configValue) && Array.isArray(expected)) {
+        // Check if configValue contains all elements from expected
+        return expected.every(expectedItem =>
+            configValue.some(configItem => isConfigurationSuperset(configItem, expectedItem))
+        );
+    }
+
+    // Handle objects
+    if (
+        typeof configValue === "object" &&
+        typeof expected === "object" &&
+        configValue !== null &&
+        expected !== null &&
+        !Array.isArray(configValue) &&
+        !Array.isArray(expected)
+    ) {
+        // Ensure we're working with plain objects
+        const configObj = configValue as Record<string, unknown>;
+        const expectedObj = expected as Record<string, unknown>;
+
+        // Check if all expected properties exist in configValue with matching or superset values
+        return Object.keys(expectedObj).every(key => {
+            // If the key doesn't exist in configValue, return false
+            if (!(key in configObj)) {
+                return false;
+            }
+
+            // Recursively check the value
+            return isConfigurationSuperset(configObj[key], expectedObj[key]);
+        });
+    }
+
+    // If types don't match (one is array, one is object), return false
+    return false;
 }

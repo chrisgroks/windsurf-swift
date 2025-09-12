@@ -11,21 +11,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as vscode from "vscode";
-import { WorkspaceContext } from "../WorkspaceContext";
+
 import { FolderContext } from "../FolderContext";
-import { Product } from "../SwiftPackage";
+import { Product, isAutomatic } from "../SwiftPackage";
+import { WorkspaceContext } from "../WorkspaceContext";
 import configuration, {
     ShowBuildStatusOptions,
     substituteVariablesInString,
 } from "../configuration";
+import { BuildConfigurationFactory } from "../debugger/buildConfig";
+import { SwiftExecution } from "../tasks/SwiftExecution";
+import { SwiftToolchain } from "../toolchain/toolchain";
+import { getPlatformConfig, packageName, resolveScope, resolveTaskCwd } from "../utilities/tasks";
 import { swiftRuntimeEnv } from "../utilities/utilities";
 import { Version } from "../utilities/version";
-import { SwiftToolchain } from "../toolchain/toolchain";
-import { SwiftExecution } from "../tasks/SwiftExecution";
-import { resolveTaskCwd } from "../utilities/tasks";
-import { BuildConfigurationFactory } from "../debugger/buildConfig";
 
 /**
  * References:
@@ -44,13 +44,13 @@ interface TaskConfig {
     scope: vscode.TaskScope | vscode.WorkspaceFolder;
     group?: vscode.TaskGroup;
     presentationOptions?: vscode.TaskPresentationOptions;
-    prefix?: string;
+    packageName?: string;
     disableTaskQueue?: boolean;
     dontTriggerTestDiscovery?: boolean;
     showBuildStatus?: ShowBuildStatusOptions;
 }
 
-interface TaskPlatformSpecificConfig {
+export interface TaskPlatformSpecificConfig {
     args?: string[];
     cwd?: string;
     env?: { [name: string]: unknown };
@@ -135,12 +135,13 @@ export function resetBuildAllTaskCache() {
     buildAllTaskCache.reset();
 }
 
-function buildAllTaskName(folderContext: FolderContext, release: boolean): string {
+export function buildAllTaskName(folderContext: FolderContext, release: boolean): string {
     let buildTaskName = release
         ? `${SwiftTaskProvider.buildAllName} - Release`
         : SwiftTaskProvider.buildAllName;
-    if (folderContext.relativePath.length > 0) {
-        buildTaskName += ` (${folderContext.relativePath})`;
+    const packageNamePostfix = packageName(folderContext);
+    if (packageNamePostfix) {
+        buildTaskName += ` (${packageNamePostfix})`;
     }
     return buildTaskName;
 }
@@ -160,7 +161,7 @@ export async function createBuildAllTask(
         {
             group: vscode.TaskGroup.Build,
             cwd: folderContext.folder,
-            scope: folderContext.workspaceFolder,
+            scope: resolveScope(folderContext.workspaceFolder),
             presentationOptions: {
                 reveal: getBuildRevealOption(),
             },
@@ -189,11 +190,17 @@ export async function getBuildAllTask(
     // search for build all task in task.json first, that are valid for folder
     const tasks = await vscode.tasks.fetchTasks();
     const workspaceTasks = tasks.filter(task => {
-        if (task.source !== "Workspace" || task.scope !== folderContext.workspaceFolder) {
+        if (task.source !== "Workspace") {
             return false;
         }
         const swiftExecutionOptions = (task.execution as SwiftExecution).options;
         let cwd = swiftExecutionOptions?.cwd;
+        if (task.scope === vscode.TaskScope.Workspace) {
+            return cwd && substituteVariablesInString(cwd) === folderContext.folder.fsPath;
+        }
+        if (task.scope !== folderContext.workspaceFolder) {
+            return false;
+        }
         if (cwd === "${workspaceFolder}" || cwd === undefined) {
             cwd = folderWorkingDir;
         }
@@ -232,22 +239,18 @@ export async function getBuildAllTask(
  */
 function createBuildTasks(product: Product, folderContext: FolderContext): vscode.Task[] {
     const toolchain = folderContext.toolchain;
-    let buildTaskNameSuffix = "";
-    if (folderContext.relativePath.length > 0) {
-        buildTaskNameSuffix = ` (${folderContext.relativePath})`;
-    }
-
-    const buildDebugName = `Build Debug ${product.name}${buildTaskNameSuffix}`;
+    const buildDebugName = `Build Debug ${product.name}`;
     const buildDebugTask = createSwiftTask(
         ["build", "--product", product.name, ...buildOptions(toolchain)],
         buildDebugName,
         {
             group: vscode.TaskGroup.Build,
             cwd: folderContext.folder,
-            scope: folderContext.workspaceFolder,
+            scope: resolveScope(folderContext.workspaceFolder),
             presentationOptions: {
                 reveal: getBuildRevealOption(),
             },
+            packageName: packageName(folderContext),
             disableTaskQueue: true,
             dontTriggerTestDiscovery: true,
         },
@@ -255,10 +258,10 @@ function createBuildTasks(product: Product, folderContext: FolderContext): vscod
     );
     const buildDebug = buildAllTaskCache.get(buildDebugName, folderContext, buildDebugTask);
 
-    const buildReleaseName = `Build Release ${product.name}${buildTaskNameSuffix}`;
+    const buildReleaseName = `Build Release ${product.name}`;
     const buildReleaseTask = createSwiftTask(
         ["build", "-c", "release", "--product", product.name, ...buildOptions(toolchain, false)],
-        `Build Release ${product.name}${buildTaskNameSuffix}`,
+        `Build Release ${product.name}`,
         {
             group: vscode.TaskGroup.Build,
             cwd: folderContext.folder,
@@ -266,6 +269,7 @@ function createBuildTasks(product: Product, folderContext: FolderContext): vscod
             presentationOptions: {
                 reveal: getBuildRevealOption(),
             },
+            packageName: packageName(folderContext),
             disableTaskQueue: true,
             dontTriggerTestDiscovery: true,
         },
@@ -306,6 +310,9 @@ export function createSwiftTask(
     }*/
     const env = { ...configuration.swiftEnvironmentVariables, ...swiftRuntimeEnv(), ...cmdEnv };
     const presentation = config?.presentationOptions ?? {};
+    if (config?.packageName) {
+        name += ` (${config?.packageName})`;
+    }
     const task = new vscode.Task(
         {
             type: "swift",
@@ -334,14 +341,7 @@ export function createSwiftTask(
     );
     // This doesn't include any quotes added by VS Code.
     // See also: https://github.com/microsoft/vscode/issues/137895
-
-    let prefix: string;
-    if (config?.prefix) {
-        prefix = `(${config.prefix}) `;
-    } else {
-        prefix = "";
-    }
-    task.detail = `${prefix}swift ${args.join(" ")}`;
+    task.detail = `swift ${args.join(" ")}`;
     task.group = config?.group;
     task.presentationOptions = presentation;
     return task as SwiftTask;
@@ -404,7 +404,7 @@ export class SwiftTaskProvider implements vscode.TaskProvider {
                         type: "swift",
                         args: [],
                     },
-                    folderContext.workspaceFolder,
+                    resolveScope(folderContext.workspaceFolder),
                     buildTaskName,
                     "swift",
                     new vscode.CustomExecution(() => {
@@ -424,6 +424,16 @@ export class SwiftTaskProvider implements vscode.TaskProvider {
             const executables = await folderContext.swiftPackage.executableProducts;
             for (const executable of executables) {
                 tasks.push(...createBuildTasks(executable, folderContext));
+            }
+
+            if (configuration.createTasksForLibraryProducts) {
+                const libraries = await folderContext.swiftPackage.libraryProducts;
+                for (const lib of libraries) {
+                    if (isAutomatic(lib)) {
+                        continue;
+                    }
+                    tasks.push(...createBuildTasks(lib, folderContext));
+                }
             }
         }
         return tasks;
@@ -447,14 +457,7 @@ export class SwiftTaskProvider implements vscode.TaskProvider {
         const toolchain = currentFolder.toolchain;
         const swift = toolchain.getToolchainExecutable("swift");
         // platform specific
-        let platform: TaskPlatformSpecificConfig | undefined;
-        if (process.platform === "win32") {
-            platform = task.definition.windows;
-        } else if (process.platform === "linux") {
-            platform = task.definition.linux;
-        } else if (process.platform === "darwin") {
-            platform = task.definition.macos;
-        }
+        const platform: TaskPlatformSpecificConfig | undefined = getPlatformConfig(task);
         // get args and cwd values from either platform specific block or base
         const args = (platform?.args ?? task.definition.args ?? []).map(
             substituteVariablesInString

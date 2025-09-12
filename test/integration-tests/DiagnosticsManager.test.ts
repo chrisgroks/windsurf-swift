@@ -11,28 +11,30 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as assert from "assert";
+import { expect } from "chai";
 import * as vscode from "vscode";
-import { SwiftToolchain } from "../../src/toolchain/toolchain";
+
+import { DiagnosticsManager } from "@src/DiagnosticsManager";
+import { FolderContext } from "@src/FolderContext";
+import { WorkspaceContext } from "@src/WorkspaceContext";
+import { DiagnosticStyle } from "@src/configuration";
+import { createBuildAllTask, resetBuildAllTaskCache } from "@src/tasks/SwiftTaskProvider";
+import { SwiftToolchain } from "@src/toolchain/toolchain";
+import { Version } from "@src/utilities/version";
+
+import { testAssetUri, testSwiftTask } from "../fixtures";
+import { tag } from "../tags";
 import {
     executeTaskAndWaitForResult,
     waitForNoRunningTasks,
     waitForStartTaskProcess,
 } from "../utilities/tasks";
-import { WorkspaceContext } from "../../src/WorkspaceContext";
-import { testAssetUri, testSwiftTask } from "../fixtures";
-import { createBuildAllTask, resetBuildAllTaskCache } from "../../src/tasks/SwiftTaskProvider";
-import { DiagnosticsManager } from "../../src/DiagnosticsManager";
-import { FolderContext } from "../../src/FolderContext";
-import { Version } from "../../src/utilities/version";
 import {
     activateExtensionForSuite,
     folderInRootWorkspace,
     updateSettings,
 } from "./utilities/testutilities";
-import { DiagnosticStyle } from "../../src/configuration";
-import { expect } from "chai";
 
 const isEqual = (d1: vscode.Diagnostic, d2: vscode.Diagnostic) => {
     return (
@@ -66,9 +68,7 @@ function assertWithoutDiagnostic(uri: vscode.Uri, expected: vscode.Diagnostic) {
     );
 }
 
-suite("DiagnosticsManager Test Suite", function () {
-    this.timeout(60 * 1000 * 5); // Allow up to 5 minutes for build
-
+tag("medium").suite("DiagnosticsManager Test Suite", function () {
     let workspaceContext: WorkspaceContext;
     let folderContext: FolderContext;
     let cFolderContext: FolderContext;
@@ -134,7 +134,7 @@ suite("DiagnosticsManager Test Suite", function () {
             cFolderContext = await folderInRootWorkspace("diagnosticsC", workspaceContext);
             cppFolderContext = await folderInRootWorkspace("diagnosticsCpp", workspaceContext);
             mainUri = testAssetUri("diagnostics/Sources/main.swift");
-            funcUri = testAssetUri("diagnostics/Sources/func.swift");
+            funcUri = testAssetUri("diagnostics/Sources/func in here.swift"); // Want spaces in name to watch https://github.com/swiftlang/vscode-swift/issues/1630
             cUri = testAssetUri("diagnosticsC/Sources/MyPoint/MyPoint.c");
             cppUri = testAssetUri("diagnosticsCpp/Sources/MyPoint/MyPoint.cpp");
             cppHeaderUri = testAssetUri("diagnosticsCpp/Sources/MyPoint/include/MyPoint.h");
@@ -236,7 +236,10 @@ suite("DiagnosticsManager Test Suite", function () {
                             this.skip();
                         }
 
-                        resetSettings = await updateSettings({ "swift.diagnosticsStyle": style });
+                        resetSettings = await updateSettings({
+                            "swift.diagnosticsStyle": style,
+                            "swift.buildArguments": ["-Xswiftc", `-DDIAGNOSTIC_STYLE=${style}`],
+                        });
 
                         // Clean up any lingering diagnostics
                         if (vscode.languages.getDiagnostics(mainUri).length > 0) {
@@ -271,19 +274,50 @@ suite("DiagnosticsManager Test Suite", function () {
                 });
             }
 
-            runTestDiagnosticStyle("default", () => ({
-                [mainUri.fsPath]: [
-                    expectedWarningDiagnostic,
-                    expectedMainErrorDiagnostic,
-                    expectedMainDictErrorDiagnostic,
-                    ...(workspaceContext.globalToolchainSwiftVersion.isGreaterThanOrEqual(
-                        new Version(6, 0, 0)
-                    )
-                        ? [expectedMacroDiagnostic]
-                        : []),
-                ], // Should have parsed correct severity
-                [funcUri.fsPath]: [expectedFuncErrorDiagnostic], // Check parsed for other file
-            }));
+            runTestDiagnosticStyle(
+                "default",
+                () => ({
+                    [mainUri.fsPath]: [
+                        expectedWarningDiagnostic,
+                        expectedMainErrorDiagnostic,
+                        expectedMainDictErrorDiagnostic,
+                        ...(workspaceContext.globalToolchainSwiftVersion.isGreaterThanOrEqual(
+                            new Version(6, 0, 0)
+                        )
+                            ? [expectedMacroDiagnostic]
+                            : []),
+                    ], // Should have parsed correct severity
+                    [funcUri.fsPath]: [expectedFuncErrorDiagnostic], // Check parsed for other file
+                }),
+                () => {
+                    test("Parses related information", async function () {
+                        if (
+                            workspaceContext.globalToolchainSwiftVersion.isLessThan(
+                                new Version(6, 1, 0)
+                            )
+                        ) {
+                            this.skip();
+                        }
+                        const diagnostic = assertHasDiagnostic(mainUri, expectedMacroDiagnostic);
+                        // Should have parsed related note
+                        assert.equal(diagnostic.relatedInformation?.length, 1);
+                        assert.equal(
+                            diagnostic.relatedInformation![0].message,
+                            "Expanded code originates here"
+                        );
+                        assert.equal(
+                            diagnostic.relatedInformation![0].location.uri.fsPath,
+                            mainUri.fsPath
+                        );
+                        assert.equal(
+                            diagnostic.relatedInformation![0].location.range.isEqual(
+                                expectedMacroDiagnostic.range
+                            ),
+                            true
+                        );
+                    });
+                }
+            );
 
             runTestDiagnosticStyle("swift", () => ({
                 [mainUri.fsPath]: [
@@ -686,6 +720,45 @@ suite("DiagnosticsManager Test Suite", function () {
                         "swift.openEducationalNote"
                     );
                     expect(matchingDiagnostic.code.target.query).to.contain(pathToMd);
+                } else {
+                    assert.fail("Diagnostic target not replaced with markdown command");
+                }
+            });
+
+            test("target with malformed nightly link", async () => {
+                const malformedUri =
+                    "/path/to/TestPackage/https:/docs.swift.org/compiler/documentation/diagnostics/nominal-types";
+                const expectedUri =
+                    "https://docs.swift.org/compiler/documentation/diagnostics/nominal-types/";
+                diagnostic.code = {
+                    value: "string",
+                    target: vscode.Uri.file(malformedUri),
+                };
+
+                workspaceContext.diagnostics.handleDiagnostics(
+                    mainUri,
+                    DiagnosticsManager.isSourcekit,
+                    [diagnostic]
+                );
+
+                const diagnostics = vscode.languages.getDiagnostics(mainUri);
+                const matchingDiagnostic = diagnostics.find(findDiagnostic(diagnostic));
+
+                expect(matchingDiagnostic).to.have.property("code");
+                expect(matchingDiagnostic?.code).to.have.property("value", "More Information...");
+
+                if (
+                    matchingDiagnostic &&
+                    matchingDiagnostic.code &&
+                    typeof matchingDiagnostic.code !== "string" &&
+                    typeof matchingDiagnostic.code !== "number"
+                ) {
+                    expect(matchingDiagnostic.code.target.scheme).to.equal("command");
+                    expect(matchingDiagnostic.code.target.path).to.equal(
+                        "swift.openEducationalNote"
+                    );
+                    const parsed = JSON.parse(matchingDiagnostic.code.target.query);
+                    expect(vscode.Uri.from(parsed).toString()).to.equal(expectedUri);
                 } else {
                     assert.fail("Diagnostic target not replaced with markdown command");
                 }

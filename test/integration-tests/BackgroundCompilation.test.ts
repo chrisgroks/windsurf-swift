@@ -11,23 +11,26 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as assert from "assert";
 import * as vscode from "vscode";
-import { WorkspaceContext } from "../../src/WorkspaceContext";
+
+import { WorkspaceContext } from "@src/WorkspaceContext";
+
 import { testAssetUri } from "../fixtures";
+import { tag } from "../tags";
+import { closeAllEditors } from "../utilities/commands";
 import { waitForNoRunningTasks } from "../utilities/tasks";
-import { Workbench } from "../../src/utilities/commands";
 import { activateExtensionForTest, updateSettings } from "./utilities/testutilities";
 
-suite("BackgroundCompilation Test Suite", () => {
+tag("large").suite("BackgroundCompilation Test Suite", () => {
+    let subscriptions: vscode.Disposable[];
     let workspaceContext: WorkspaceContext;
 
     activateExtensionForTest({
         async setup(ctx) {
+            subscriptions = [];
             workspaceContext = ctx;
             assert.notEqual(workspaceContext.folders.length, 0);
-            await waitForNoRunningTasks();
             return await updateSettings({
                 "swift.backgroundCompilation": true,
             });
@@ -35,21 +38,20 @@ suite("BackgroundCompilation Test Suite", () => {
     });
 
     suiteTeardown(async () => {
-        await vscode.commands.executeCommand(Workbench.ACTION_CLOSEALLEDITORS);
+        subscriptions.forEach(s => s.dispose());
+        await closeAllEditors();
     });
 
-    test("build all on save @slow", async () => {
-        const taskPromise = new Promise<void>(res => {
-            vscode.tasks.onDidStartTask(e => {
-                const task = e.execution.task;
-                if (task.name.includes("Build All")) {
-                    vscode.tasks.onDidEndTask(e => {
-                        if (e.execution.task === task) {
-                            res();
-                        }
-                    });
-                }
-            });
+    test("build all on save", async () => {
+        const taskStartPromise = new Promise<void>(resolve => {
+            subscriptions.push(
+                vscode.tasks.onDidStartTask(e => {
+                    const task = e.execution.task;
+                    if (task.name.includes("Build All")) {
+                        resolve();
+                    }
+                })
+            );
         });
 
         const uri = testAssetUri("defaultPackage/Sources/PackageExe/main.swift");
@@ -57,6 +59,7 @@ suite("BackgroundCompilation Test Suite", () => {
         await vscode.window.showTextDocument(doc);
         await vscode.workspace.save(uri);
 
-        await taskPromise;
-    }).timeout(180000);
+        await taskStartPromise;
+        await waitForNoRunningTasks();
+    });
 });

@@ -12,11 +12,11 @@
 //
 //===----------------------------------------------------------------------===//
 /* eslint-disable no-console */
-
 import * as child_process from "child_process";
-import { mkdtemp, readFile, rm } from "fs/promises";
-import * as path from "path";
+import { copyFile, mkdtemp, readFile, rm } from "fs/promises";
 import * as os from "os";
+import * as path from "path";
+import { replaceInFile } from "replace-in-file";
 import * as semver from "semver";
 
 /**
@@ -26,13 +26,11 @@ import * as semver from "semver";
  *
  * @param mainFn The main function of the script that will be run.
  */
-export async function main(mainFn: () => Promise<void>): Promise<void> {
-    try {
-        await mainFn();
-    } catch (error) {
+export function main(mainFn: () => Promise<void>) {
+    mainFn().catch(error => {
         console.error(error);
         process.exit(1);
-    }
+    });
 }
 
 /**
@@ -43,12 +41,24 @@ export function getRootDirectory(): string {
 }
 
 /**
+ * Returns the path to the extension manifest.
+ */
+export function getManifest(): string {
+    return path.join(getRootDirectory(), "package.json");
+}
+
+/**
+ * Returns the path to the extension changelog.
+ */
+export function getChangelog(): string {
+    return path.join(getRootDirectory(), "CHANGELOG.md");
+}
+
+/**
  * Retrieves the version number from the package.json.
  */
 export async function getExtensionVersion(): Promise<semver.SemVer> {
-    const packageJSON = JSON.parse(
-        await readFile(path.join(getRootDirectory(), "package.json"), "utf-8")
-    );
+    const packageJSON = JSON.parse(await readFile(getManifest(), "utf-8"));
     if (typeof packageJSON.version !== "string") {
         throw new Error("Version number in package.json is not a string");
     }
@@ -111,4 +121,62 @@ export async function withTemporaryDirectory<T>(
             console.error(error);
         });
     }
+}
+
+export async function updateChangelog(version: string): Promise<string> {
+    const tempChangelog = path.join(getRootDirectory(), `CHANGELOG-${version}.md`);
+    await copyFile(getChangelog(), tempChangelog);
+    await replaceInFile({
+        files: tempChangelog,
+        from: /{{releaseVersion}}/g,
+        to: version,
+    });
+    const date = new Date();
+    const year = date.getUTCFullYear().toString().padStart(4, "0");
+    const month = (date.getUTCMonth() + 1).toString().padStart(2, "0");
+    const day = date.getUTCDate().toString().padStart(2, "0");
+    await replaceInFile({
+        files: tempChangelog,
+        from: /{{releaseDate}}/g,
+        to: `${year}-${month}-${day}`,
+    });
+    return tempChangelog;
+}
+
+export interface PackageExtensionOptions {
+    preRelease?: boolean;
+}
+
+export async function packageExtension(version: string, options: PackageExtensionOptions = {}) {
+    // Update version in a temporary CHANGELOG
+    const changelogPath = await updateChangelog(version);
+
+    // Use VSCE to package the extension
+    // Note: There are no sendgrid secrets in the extension. `--allow-package-secrets` works around a false positive
+    // where the symbol `SG.MessageTransports.is` can appear in the dist.js if we're unlucky enough
+    // to have `SG` as the minified name of a namespace. Here is the rule we sometimes mistakenly match:
+    // https://github.com/secretlint/secretlint/blob/5706ac4942f098b845570541903472641d4ae914/packages/%40secretlint/secretlint-rule-sendgrid/src/index.ts#L35
+    await exec(
+        "npx",
+        [
+            "vsce",
+            "package",
+            ...(options.preRelease === true ? ["--pre-release"] : []),
+            "--allow-package-secrets",
+            "sendgrid",
+            "--no-update-package-json",
+            "--changelog-path",
+            path.basename(changelogPath),
+            version,
+        ],
+        {
+            cwd: getRootDirectory(),
+        }
+    );
+
+    // Clean up temporary changelog
+    await rm(changelogPath, { force: true }).catch(error => {
+        console.error(`Failed to remove temporary changelog '${changelogPath}'`);
+        console.error(error);
+    });
 }

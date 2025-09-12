@@ -32,9 +32,12 @@ This extension adds language support for Swift to Windsurf, providing a seamless
 * Package dependency view
 * Test Explorer view
 
+> **Note**  
+> Most features of the Swift for Visual Studio Code extension only work with projects that build with Swift Package Manager. These projects will have a `Package.swift` file in their root folder. Support for Xcode projects (`.xcodeproj`) is limited.
+
 # Documentation
 
-The official documentation for this extension is available at [vscode-swift](https://docs.swift.org/vscode/documentation/userdocs)
+The [getting started guide](https://www.swift.org/documentation/articles/getting-started-with-vscode-swift.html) and [official documentation](https://docs.swift.org/vscode/documentation/userdocs) for this extension are available on [swift.org](https://www.swift.org).
 
 This extension uses [SourceKit LSP](https://github.com/apple/sourcekit-lsp) for the [language server](https://microsoft.github.io/language-server-protocol/overviews/lsp/overview/), which powers code completion. It also has a dependency on the [LLDB DAP](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.lldb-dap) extension to enable debugging.
 

@@ -11,15 +11,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
 import * as fs from "fs";
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-import stripAnsi = require("strip-ansi");
+import * as path from "path";
+import * as vscode from "vscode";
+
+import { WorkspaceContext } from "./WorkspaceContext";
 import configuration from "./configuration";
 import { SwiftExecution } from "./tasks/SwiftExecution";
-import { WorkspaceContext } from "./WorkspaceContext";
+import { validFileTypes } from "./utilities/filesystem";
 import { checkIfBuildComplete, lineBreakRegex } from "./utilities/tasks";
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import stripAnsi = require("strip-ansi");
 
 interface ParsedDiagnostic {
     uri: string;
@@ -97,9 +100,18 @@ export class DiagnosticsManager implements vscode.Disposable {
                         );
                     });
                 })
-                .catch(e =>
-                    context.outputChannel.log(`${e}`, 'Failed to provide "swiftc" diagnostics')
-                );
+                .catch(e => context.logger.error(`Failed to provide "swiftc" diagnostics: ${e}`));
+        });
+        const fileTypes = validFileTypes.join(",");
+        this.workspaceFileWatcher = vscode.workspace.createFileSystemWatcher(
+            `**/*.{${fileTypes}}`,
+            true,
+            true
+        );
+        this.onDidDeleteDisposible = this.workspaceFileWatcher.onDidDelete(uri => {
+            if (this.allDiagnostics.delete(uri.fsPath)) {
+                this.diagnosticCollection.delete(uri);
+            }
         });
     }
 
@@ -149,7 +161,24 @@ export class DiagnosticsManager implements vscode.Disposable {
                 typeof diagnostic.code !== "string" &&
                 typeof diagnostic.code !== "number"
             ) {
-                if (diagnostic.code.target.fsPath.endsWith(".md")) {
+                const fsPath = diagnostic.code.target.fsPath;
+
+                // Work around a bug in the nightlies where the URL comes back looking like:
+                // `/path/to/TestPackage/https:/docs.swift.org/compiler/documentation/diagnostics/nominal-types`
+                // Transform this in to a valid docs.swift.org URL which the openEducationalNote command
+                // will open in a browser.
+                // FIXME: This can be removed when the bug is fixed in sourcekit-lsp.
+                let open = false;
+                const needle = `https:${path.sep}docs.swift.org${path.sep}`;
+                if (fsPath.indexOf(needle) !== -1) {
+                    const extractedPath = `https://docs.swift.org/${fsPath.split(needle).pop()}/`;
+                    diagnostic.code.target = vscode.Uri.parse(extractedPath.replace(/\\/g, "/"));
+                    open = true;
+                } else if (diagnostic.code.target.fsPath.endsWith(".md")) {
+                    open = true;
+                }
+
+                if (open) {
                     diagnostic.code = {
                         target: vscode.Uri.parse(
                             `command:swift.openEducationalNote?${encodeURIComponent(JSON.stringify(diagnostic.code.target))}`
@@ -258,6 +287,8 @@ export class DiagnosticsManager implements vscode.Disposable {
         this.diagnosticCollection.dispose();
         this.onDidStartTaskDisposible.dispose();
         this.onDidChangeConfigurationDisposible.dispose();
+        this.onDidDeleteDisposible.dispose();
+        this.workspaceFileWatcher.dispose();
     }
 
     private includeSwiftcDiagnostics(): boolean {
@@ -373,7 +404,7 @@ export class DiagnosticsManager implements vscode.Disposable {
         line: string
     ): ParsedDiagnostic | vscode.DiagnosticRelatedInformation | undefined {
         const diagnosticRegex =
-            /^(?:\S+\s+)?(.*?):(\d+)(?::(\d+))?:\s+(warning|error|note):\s+(.*)$/g;
+            /^(?:[`-\s]*)(.*?):(\d+)(?::(\d+))?:\s+(warning|error|note):\s+(.*)$/g;
         const switfcExtraWarningsRegex = /\[(-W|#).*?\]/g;
         const match = diagnosticRegex.exec(line);
         if (!match) {
@@ -436,4 +467,6 @@ export class DiagnosticsManager implements vscode.Disposable {
 
     private onDidStartTaskDisposible: vscode.Disposable;
     private onDidChangeConfigurationDisposible: vscode.Disposable;
+    private onDidDeleteDisposible: vscode.Disposable;
+    private workspaceFileWatcher: vscode.FileSystemWatcher;
 }

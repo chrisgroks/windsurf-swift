@@ -11,18 +11,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as vscode from "vscode";
+
 import { FolderContext } from "../FolderContext";
-import { createSwiftTask, SwiftTaskProvider } from "../tasks/SwiftTaskProvider";
 import { WorkspaceContext } from "../WorkspaceContext";
+import { SwiftTaskProvider, createSwiftTask } from "../tasks/SwiftTaskProvider";
+import { packageName } from "../utilities/tasks";
 import { executeTaskWithUI } from "./utilities";
 
 /**
  * Executes a {@link vscode.Task task} to reset the complete cache/build directory.
  */
-export async function resetPackage(ctx: WorkspaceContext) {
-    const current = ctx.currentFolder;
+export async function resetPackage(ctx: WorkspaceContext, folder: FolderContext | undefined) {
+    const current = folder ?? ctx.currentFolder;
     if (!current) {
         return;
     }
@@ -40,12 +41,25 @@ export async function folderResetPackage(folderContext: FolderContext) {
         {
             cwd: folderContext.folder,
             scope: folderContext.workspaceFolder,
-            prefix: folderContext.name,
+            packageName: packageName(folderContext),
             presentationOptions: { reveal: vscode.TaskRevealKind.Silent },
             group: vscode.TaskGroup.Clean,
         },
         folderContext.toolchain
     );
+
+    const languageClientManager = () =>
+        folderContext.workspaceContext.languageClientManager.get(folderContext);
+    const shouldStop = process.platform === "win32";
+    if (shouldStop) {
+        await vscode.window.withProgress(
+            {
+                title: "Stopping the SourceKit-LSP server",
+                location: vscode.ProgressLocation.Window,
+            },
+            async () => await languageClientManager().stop(false)
+        );
+    }
 
     return await executeTaskWithUI(task, "Reset Package", folderContext).then(
         async success => {
@@ -58,7 +72,7 @@ export async function folderResetPackage(folderContext: FolderContext) {
                 {
                     cwd: folderContext.folder,
                     scope: folderContext.workspaceFolder,
-                    prefix: folderContext.name,
+                    packageName: packageName(folderContext),
                     presentationOptions: { reveal: vscode.TaskRevealKind.Silent },
                 },
                 folderContext.toolchain
@@ -69,6 +83,9 @@ export async function folderResetPackage(folderContext: FolderContext) {
                 "Resolving Dependencies",
                 folderContext
             );
+            if (shouldStop) {
+                await languageClientManager().restart();
+            }
             return result;
         },
         reason => {

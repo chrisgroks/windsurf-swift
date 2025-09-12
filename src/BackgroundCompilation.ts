@@ -11,19 +11,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as vscode from "vscode";
-import { getBuildAllTask } from "./tasks/SwiftTaskProvider";
-import configuration from "./configuration";
+
 import { FolderContext } from "./FolderContext";
+import configuration from "./configuration";
+import { getBuildAllTask } from "./tasks/SwiftTaskProvider";
 import { TaskOperation } from "./tasks/TaskQueue";
+import { validFileTypes } from "./utilities/filesystem";
+
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import debounce = require("lodash.debounce");
 
 export class BackgroundCompilation implements vscode.Disposable {
     private workspaceFileWatcher?: vscode.FileSystemWatcher;
     private configurationEventDisposable?: vscode.Disposable;
-    private validFileTypes = ["swift", "c", "cpp", "h", "hpp", "m", "mm"];
     private disposables: vscode.Disposable[] = [];
 
     constructor(private folderContext: FolderContext) {
@@ -44,7 +45,7 @@ export class BackgroundCompilation implements vscode.Disposable {
     }
 
     private setupFileWatching() {
-        const fileTypes = this.validFileTypes.join(",");
+        const fileTypes = validFileTypes.join(",");
         const rootFolders = ["Sources", "Tests", "Snippets", "Plugins"].join(",");
         this.disposables.push(
             (this.workspaceFileWatcher = vscode.workspace.createFileSystemWatcher(

@@ -11,9 +11,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
 import * as vscode from "vscode";
+
 import { DocumentParser } from "./DocumentParser";
+
+function isLineComment(document: vscode.TextDocument, line: number): boolean {
+    // test if line consists of just '///'
+    return /^\s*\/\/\//.test(document.lineAt(line).text);
+}
 
 /** CompletionItem for Swift Comments */
 class CommentCompletion extends vscode.CompletionItem {
@@ -34,25 +39,44 @@ class CommentCompletion extends vscode.CompletionItem {
  * CompletionItem Provider that provides "///" on pressing return if previous line
  * contained a "///" documentation comment.
  */
-class CommentCompletionProvider implements vscode.CompletionItemProvider {
+class DocCommentCompletionProvider implements vscode.CompletionItemProvider {
     public async provideCompletionItems(
         document: vscode.TextDocument,
         position: vscode.Position
     ): Promise<vscode.CompletionItem[] | undefined> {
         // Is line a '///' comment
-        if (position.line === 0 || this.isLineComment(document, position.line - 1) === false) {
+        if (
+            position.line === 0 ||
+            document.isClosed ||
+            isLineComment(document, position.line - 1) === false
+        ) {
             return undefined;
         }
-        const completion = new CommentCompletion("/// ", "///", "Documentation comment");
-        return [completion];
+        await this.continueExistingDocCommentBlock(document, position);
+        return [new CommentCompletion("/// ", "///", "Documentation comment")];
     }
 
-    private isLineComment(document: vscode.TextDocument, line: number): boolean {
-        // test if line starts with '///'
-        if (/^\s*\/\/\//.test(document.lineAt(line).text)) {
-            return true;
+    private async continueExistingDocCommentBlock(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ) {
+        // Fixes https://github.com/swiftlang/vscode-swift/issues/1648
+        const lineText = document.lineAt(position.line).text;
+        // Continue the comment if its a white space only line, or if VS Code has already continued
+        // the comment by adding a // on the new line.
+        const match =
+            lineText.trim().length === 0
+                ? [lineText, lineText, ""]
+                : /^(\s*)\/\/\s(.+)/.exec(lineText);
+        if (match) {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                document.uri,
+                new vscode.Range(position.line, 0, position.line, match[0].length),
+                `${match[1]}/// ${match[2]}`
+            );
+            await vscode.workspace.applyEdit(edit);
         }
-        return false;
     }
 }
 
@@ -73,7 +97,7 @@ class FunctionDocumentationCompletionProvider implements vscode.CompletionItemPr
         position: vscode.Position
     ): Promise<vscode.CompletionItem[] | undefined> {
         // Is line a '///' comment
-        const isComment = this.isLineComment(document, position.line);
+        const isComment = isLineComment(document, position.line);
         if (isComment === false) {
             return undefined;
         }
@@ -117,14 +141,6 @@ class FunctionDocumentationCompletionProvider implements vscode.CompletionItemPr
         }
     }
 
-    private isLineComment(document: vscode.TextDocument, line: number): boolean {
-        // test if line consists of just '///'
-        if (/^\s*\/\/\/\s*$/.test(document.lineAt(line).text)) {
-            return true;
-        }
-        return false;
-    }
-
     /**
      * Extract function details from line below. Inspiration for this code can be found
      * here https://github.com/fappelman/swift-add-documentation
@@ -134,7 +150,7 @@ class FunctionDocumentationCompletionProvider implements vscode.CompletionItemPr
         position: vscode.Position
     ): FunctionDetails | null {
         const parser = new DocumentParser(document, position);
-        if (!parser.match(/^[^{]*\b(?:func|init)/)) {
+        if (!parser.match(/\b(?:func|init)\b(?=[^{]*\{)/)) {
             return null;
         }
         const funcName = parser.match(/^([^(<]*)\s*(\(|<)/);
@@ -234,8 +250,9 @@ class FunctionDocumentationCompletionProvider implements vscode.CompletionItemPr
  */
 export class CommentCompletionProviders implements vscode.Disposable {
     functionCommentCompletion: FunctionDocumentationCompletionProvider;
+    docCommentCompletion: DocCommentCompletionProvider;
     functionCommentCompletionProvider: vscode.Disposable;
-    commentCompletionProvider: vscode.Disposable;
+    docCommentCompletionProvider: vscode.Disposable;
 
     constructor() {
         this.functionCommentCompletion = new FunctionDocumentationCompletionProvider();
@@ -244,9 +261,10 @@ export class CommentCompletionProviders implements vscode.Disposable {
             this.functionCommentCompletion,
             "/"
         );
-        this.commentCompletionProvider = vscode.languages.registerCompletionItemProvider(
+        this.docCommentCompletion = new DocCommentCompletionProvider();
+        this.docCommentCompletionProvider = vscode.languages.registerCompletionItemProvider(
             "swift",
-            new CommentCompletionProvider(),
+            this.docCommentCompletion,
             "\n"
         );
     }
@@ -262,6 +280,6 @@ export class CommentCompletionProviders implements vscode.Disposable {
 
     dispose() {
         this.functionCommentCompletionProvider.dispose();
-        this.commentCompletionProvider.dispose();
+        this.docCommentCompletionProvider.dispose();
     }
 }

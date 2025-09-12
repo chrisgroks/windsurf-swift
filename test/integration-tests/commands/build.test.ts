@@ -11,24 +11,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
+import { expect } from "chai";
 import * as fs from "fs/promises";
 import * as path from "path";
-import { expect } from "chai";
-import { waitForNoRunningTasks } from "../../utilities/tasks";
+import * as vscode from "vscode";
+
+import { FolderContext } from "@src/FolderContext";
+import { WorkspaceContext } from "@src/WorkspaceContext";
+import { Commands } from "@src/commands";
+import { Version } from "@src/utilities/version";
+
 import { testAssetUri } from "../../fixtures";
-import { FolderContext } from "../../../src/FolderContext";
-import { WorkspaceContext } from "../../../src/WorkspaceContext";
-import { Commands } from "../../../src/commands";
+import { tag } from "../../tags";
 import { continueSession, waitForDebugAdapterRequest } from "../../utilities/debug";
 import { activateExtensionForSuite, folderInRootWorkspace } from "../utilities/testutilities";
-import { Version } from "../../../src/utilities/version";
 
-suite("Build Commands @slow", function () {
-    // Default timeout is a bit too short, give it a little bit more time
-    this.timeout(3 * 60 * 1000);
-
+tag("large").suite("Build Commands", function () {
     let folderContext: FolderContext;
     let workspaceContext: WorkspaceContext;
     const uri = testAssetUri("defaultPackage/Sources/PackageExe/main.swift");
@@ -49,7 +47,6 @@ suite("Build Commands @slow", function () {
             vscode.debug.addBreakpoints(breakpoints);
 
             workspaceContext = ctx;
-            await waitForNoRunningTasks();
             folderContext = await folderInRootWorkspace("defaultPackage", workspaceContext);
             await workspaceContext.focusFolder(folderContext);
         },
@@ -70,7 +67,8 @@ suite("Build Commands @slow", function () {
         // NB: "stopped" is the exact command when debuggee has stopped due to break point,
         // but "stackTrace" is the deterministic sync point we will use to make sure we can execute continue
         const bpPromise = waitForDebugAdapterRequest(
-            "Debug PackageExe (defaultPackage)",
+            "Debug PackageExe (defaultPackage)" +
+                (vscode.workspace.workspaceFile ? " (workspace)" : ""),
             workspaceContext.globalToolchain.swiftVersion,
             "stackTrace"
         );

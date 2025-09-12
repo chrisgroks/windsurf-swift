@@ -11,27 +11,27 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-
-import * as vscode from "vscode";
 import * as path from "path";
-import { WorkspaceContext } from "../WorkspaceContext";
+import * as vscode from "vscode";
+
 import { PackagePlugin } from "../SwiftPackage";
-import { swiftRuntimeEnv } from "../utilities/utilities";
-import { SwiftExecution } from "../tasks/SwiftExecution";
-import { resolveTaskCwd } from "../utilities/tasks";
+import { WorkspaceContext } from "../WorkspaceContext";
 import configuration, {
     PluginPermissionConfiguration,
     substituteVariablesInString,
 } from "../configuration";
-import { SwiftTask } from "./SwiftTaskProvider";
+import { SwiftExecution } from "../tasks/SwiftExecution";
 import { SwiftToolchain } from "../toolchain/toolchain";
+import { packageName, resolveTaskCwd } from "../utilities/tasks";
+import { swiftRuntimeEnv } from "../utilities/utilities";
+import { SwiftTask } from "./SwiftTaskProvider";
 
 // Interface class for defining task configuration
 interface TaskConfig {
     cwd: vscode.Uri;
     scope: vscode.WorkspaceFolder;
     presentationOptions?: vscode.TaskPresentationOptions;
-    prefix?: string;
+    packageName?: string;
 }
 
 /**
@@ -62,6 +62,7 @@ export class SwiftPluginTaskProvider implements vscode.TaskProvider {
                         presentationOptions: {
                             reveal: vscode.TaskRevealKind.Always,
                         },
+                        packageName: packageName(folderContext),
                     })
                 );
             }
@@ -101,6 +102,7 @@ export class SwiftPluginTaskProvider implements vscode.TaskProvider {
             "swift-plugin",
             new SwiftExecution(swift, swiftArgs, {
                 cwd,
+                env: { ...configuration.swiftEnvironmentVariables, ...swiftRuntimeEnv() },
                 presentation: task.presentationOptions,
             }),
             task.problemMatchers
@@ -150,13 +152,7 @@ export class SwiftPluginTaskProvider implements vscode.TaskProvider {
             }),
             []
         );
-        let prefix: string;
-        if (config.prefix) {
-            prefix = `(${config.prefix}) `;
-        } else {
-            prefix = "";
-        }
-        task.detail = `${prefix}swift ${swiftArgs.join(" ")}`;
+        task.detail = `swift ${swiftArgs.join(" ")}`;
         task.presentationOptions = presentation;
         return task as SwiftTask;
     }
