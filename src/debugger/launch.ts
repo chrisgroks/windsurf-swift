@@ -69,6 +69,8 @@ export async function makeDebugConfigurations(
         const config = structuredClone(launchConfigs[index]);
         updateConfigWithNewKeys(config, generatedConfig, [
             "program",
+            "target",
+            "configuration",
             "cwd",
             "preLaunchTask",
             "type",
@@ -120,27 +122,88 @@ export async function makeDebugConfigurations(
     return true;
 }
 
-// Return debug launch configuration for an executable in the given folder
-export function getLaunchConfiguration(
-    target: string,
+export async function getTargetBinaryPath(
+    targetName: string,
+    buildConfiguration: "debug" | "release",
+    folderCtx: FolderContext,
+    extraArgs: string[] = []
+): Promise<string> {
+    try {
+        // Use dynamic path resolution with --show-bin-path
+        const binPath = await folderCtx.toolchain.buildFlags.getBuildBinaryPath(
+            folderCtx.folder.fsPath,
+            buildConfiguration,
+            folderCtx.workspaceContext.logger,
+            "",
+            extraArgs
+        );
+        return path.join(binPath, targetName);
+    } catch (error) {
+        // Fallback to traditional path construction if dynamic resolution fails
+        return getLegacyTargetBinaryPath(targetName, buildConfiguration, folderCtx);
+    }
+}
+
+export function getLegacyTargetBinaryPath(
+    targetName: string,
+    buildConfiguration: "debug" | "release",
     folderCtx: FolderContext
-): vscode.DebugConfiguration | undefined {
+): string {
+    return path.join(
+        BuildFlags.buildDirectoryFromWorkspacePath(folderCtx.folder.fsPath, true),
+        buildConfiguration,
+        targetName
+    );
+}
+
+/** Expands VS Code variables such as ${workspaceFolder} in the given string. */
+function expandVariables(str: string): string {
+    let expandedStr = str;
+    const availableWorkspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    // Expand the top level VS Code workspace folder.
+    if (availableWorkspaceFolders.length > 0) {
+        expandedStr = expandedStr.replaceAll(
+            "${workspaceFolder}",
+            availableWorkspaceFolders[0].uri.fsPath
+        );
+    }
+    // Expand each available VS Code workspace folder.
+    for (const workspaceFolder of availableWorkspaceFolders) {
+        expandedStr = expandedStr.replaceAll(
+            `$\{workspaceFolder:${workspaceFolder.name}}`,
+            workspaceFolder.uri.fsPath
+        );
+    }
+    return expandedStr;
+}
+
+// Return debug launch configuration for an executable in the given folder
+export async function getLaunchConfiguration(
+    target: string,
+    buildConfiguration: "debug" | "release",
+    folderCtx: FolderContext
+): Promise<vscode.DebugConfiguration | undefined> {
     const wsLaunchSection = vscode.workspace.workspaceFile
         ? vscode.workspace.getConfiguration("launch")
         : vscode.workspace.getConfiguration("launch", folderCtx.workspaceFolder);
     const launchConfigs = wsLaunchSection.get<vscode.DebugConfiguration[]>("configurations") || [];
-    const { folder } = getFolderAndNameSuffix(folderCtx);
-    const targetPath = path.join(
-        BuildFlags.buildDirectoryFromWorkspacePath(folder, true),
-        "debug",
-        target
-    );
-    // Users could be on different platforms with different path annotations,
-    // so normalize before we compare.
-    const launchConfig = launchConfigs.find(
-        config => path.normalize(config.program) === path.normalize(targetPath)
-    );
-    return launchConfig;
+    const targetPath = await getTargetBinaryPath(target, buildConfiguration, folderCtx);
+    const legacyTargetPath = getLegacyTargetBinaryPath(target, buildConfiguration, folderCtx);
+    return launchConfigs.find(config => {
+        // Newer launch configs use "target" and "configuration" properties which are easier to query.
+        if (config.target) {
+            const configBuildConfiguration = config.configuration ?? "debug";
+            return config.target === target && configBuildConfiguration === buildConfiguration;
+        }
+        // Users could be on different platforms with different path annotations, so normalize before we compare.
+        const normalizedConfigPath = path.normalize(expandVariables(config.program));
+        const normalizedTargetPath = path.normalize(targetPath);
+        const normalizedLegacyTargetPath = path.normalize(legacyTargetPath);
+        // Old launch configs had program paths that looked like "${workspaceFolder:test}/defaultPackage/.build/debug",
+        // where `debug` was a symlink to the <host-triple-folder>/debug. We want to support both old and new, so we're
+        // comparing against both to find a match.
+        return [normalizedTargetPath, normalizedLegacyTargetPath].includes(normalizedConfigPath);
+    });
 }
 
 // Return array of DebugConfigurations for executables based on what is in Package.swift
@@ -152,7 +215,6 @@ async function createExecutableConfigurations(
     // Windows understand the forward slashes, so make the configuration unified as posix path
     // to make it easier for users switching between platforms.
     const { folder, nameSuffix } = getFolderAndNameSuffix(ctx, undefined, "posix");
-    const buildDirectory = BuildFlags.buildDirectoryFromWorkspacePath(folder, true, "posix");
 
     return executableProducts.flatMap(product => {
         const baseConfig = {
@@ -165,13 +227,15 @@ async function createExecutableConfigurations(
             {
                 ...baseConfig,
                 name: `Debug ${product.name}${nameSuffix}`,
-                program: path.posix.join(buildDirectory, "debug", product.name),
+                target: product.name,
+                configuration: "debug",
                 preLaunchTask: `swift: Build Debug ${product.name}${nameSuffix}`,
             },
             {
                 ...baseConfig,
                 name: `Release ${product.name}${nameSuffix}`,
-                program: path.posix.join(buildDirectory, "release", product.name),
+                target: product.name,
+                configuration: "release",
                 preLaunchTask: `swift: Build Release ${product.name}${nameSuffix}`,
             },
         ];
@@ -184,22 +248,44 @@ async function createExecutableConfigurations(
  * @param ctx Folder context for project
  * @returns Debug configuration for running Swift Snippet
  */
-export function createSnippetConfiguration(
+export async function createSnippetConfiguration(
     snippetName: string,
     ctx: FolderContext
-): vscode.DebugConfiguration {
+): Promise<vscode.DebugConfiguration> {
     const { folder } = getFolderAndNameSuffix(ctx);
-    const buildDirectory = BuildFlags.buildDirectoryFromWorkspacePath(folder, true);
 
-    return {
-        type: SWIFT_LAUNCH_CONFIG_TYPE,
-        request: "launch",
-        name: `Run ${snippetName}`,
-        program: path.posix.join(buildDirectory, "debug", snippetName),
-        args: [],
-        cwd: folder,
-        runType: "snippet",
-    };
+    try {
+        // Use dynamic path resolution with --show-bin-path
+        const binPath = await ctx.toolchain.buildFlags.getBuildBinaryPath(
+            ctx.folder.fsPath,
+            "debug",
+            ctx.workspaceContext.logger,
+            "snippet"
+        );
+
+        return {
+            type: SWIFT_LAUNCH_CONFIG_TYPE,
+            request: "launch",
+            name: `Run ${snippetName}`,
+            program: path.posix.join(binPath, snippetName),
+            args: [],
+            cwd: folder,
+            runType: "snippet",
+        };
+    } catch (error) {
+        // Fallback to traditional path construction if dynamic resolution fails
+        const buildDirectory = BuildFlags.buildDirectoryFromWorkspacePath(folder, true);
+
+        return {
+            type: SWIFT_LAUNCH_CONFIG_TYPE,
+            request: "launch",
+            name: `Run ${snippetName}`,
+            program: path.posix.join(buildDirectory, "debug", snippetName),
+            args: [],
+            cwd: folder,
+            runType: "snippet",
+        };
+    }
 }
 
 /**
@@ -244,5 +330,61 @@ function updateConfigWithNewKeys(
             continue;
         }
         oldConfig[key] = newConfig[key];
+    }
+}
+
+/**
+ * Get the arguments for a launch configuration's preLaunchTask if it's a Swift build task
+ * @param launchConfig The launch configuration to check
+ * @param workspaceFolder The workspace folder context (optional)
+ * @returns Promise<string[] | undefined> the task arguments if it's a Swift build task, undefined otherwise
+ */
+export async function swiftPrelaunchBuildTaskArguments(
+    launchConfig: vscode.DebugConfiguration,
+    workspaceFolder?: vscode.WorkspaceFolder
+): Promise<string[] | undefined> {
+    const preLaunchTask = launchConfig.preLaunchTask;
+
+    if (!preLaunchTask || typeof preLaunchTask !== "string") {
+        return undefined;
+    }
+
+    try {
+        // Fetch all available tasks
+        const allTasks = await vscode.tasks.fetchTasks();
+
+        // Find the task by name
+        const task = allTasks.find(t => {
+            // Check if task name matches (with or without "swift: " prefix)
+            const taskName = t.name;
+            const matches =
+                taskName === preLaunchTask ||
+                taskName === `swift: ${preLaunchTask}` ||
+                `swift: ${taskName}` === preLaunchTask;
+
+            // If workspace folder is specified, also check scope
+            if (workspaceFolder && matches) {
+                return t.scope === workspaceFolder || t.scope === vscode.TaskScope.Workspace;
+            }
+
+            return matches;
+        });
+
+        if (!task) {
+            return undefined;
+        }
+
+        // Check if task type is "swift"
+        if (task.definition.type !== "swift") {
+            return undefined;
+        }
+
+        // Check if args contain "build"
+        const args = (task.definition.args as string[]) || [];
+        const hasBuild = args.includes("build");
+        return hasBuild ? args : undefined;
+    } catch (error) {
+        // Log error but don't throw - return undefined for safety
+        return undefined;
     }
 }

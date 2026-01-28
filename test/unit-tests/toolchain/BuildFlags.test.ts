@@ -12,11 +12,14 @@
 //
 //===----------------------------------------------------------------------===//
 import { expect } from "chai";
-import * as path from "path";
+import { beforeEach } from "mocha";
+import * as sinon from "sinon";
 
 import configuration from "@src/configuration";
+import { SwiftLogger } from "@src/logging/SwiftLogger";
 import { ArgumentFilter, BuildFlags } from "@src/toolchain/BuildFlags";
 import { DarwinCompatibleTarget, SwiftToolchain } from "@src/toolchain/toolchain";
+import * as utilities from "@src/utilities/utilities";
 import { Version } from "@src/utilities/version";
 
 import { MockedObject, instance, mockGlobalValue, mockObject } from "../../MockUtils";
@@ -188,11 +191,11 @@ suite("BuildFlags Test Suite", () => {
             ]);
         });
 
-        test("configuration provided, before swift 5.8", () => {
-            mockedToolchain.swiftVersion = new Version(5, 7, 0);
+        test("configuration provided", () => {
+            mockedToolchain.swiftVersion = new Version(5, 9, 0);
             buildPathConfig.setValue("/some/other/full/test/path");
             expect(buildFlags.buildPathFlags()).to.deep.equal([
-                "--build-path",
+                "--scratch-path",
                 "/some/other/full/test/path",
             ]);
         });
@@ -206,46 +209,47 @@ suite("BuildFlags Test Suite", () => {
 
             expect(
                 BuildFlags.buildDirectoryFromWorkspacePath("/some/full/workspace/test/path", false)
-            ).to.equal(path.normalize(".build"));
+            ).to.equalPath(".build");
 
             expect(
                 BuildFlags.buildDirectoryFromWorkspacePath("/some/full/workspace/test/path", true)
-            ).to.equal(path.normalize("/some/full/workspace/test/path/.build"));
+            ).to.equalPath("/some/full/workspace/test/path/.build");
         });
 
         test("absolute configuration provided", () => {
-            buildPathConfig.setValue(path.normalize("/some/other/full/test/path"));
-
-            expect(
-                BuildFlags.buildDirectoryFromWorkspacePath(
-                    path.normalize("/some/full/workspace/test/path"),
-                    false
-                )
-            ).to.equal(path.normalize("/some/other/full/test/path"));
-
-            expect(
-                BuildFlags.buildDirectoryFromWorkspacePath(
-                    path.normalize("/some/full/workspace/test/path"),
-                    true
-                )
-            ).to.equal(path.normalize("/some/other/full/test/path"));
-        });
-
-        test("relative configuration provided", () => {
-            buildPathConfig.setValue(path.normalize("some/relative/test/path"));
+            buildPathConfig.setValue("/some/other/full/test/path");
 
             expect(
                 BuildFlags.buildDirectoryFromWorkspacePath("/some/full/workspace/test/path", false)
-            ).to.equal(path.normalize("some/relative/test/path"));
+            ).to.equalPath("/some/other/full/test/path");
 
             expect(
                 BuildFlags.buildDirectoryFromWorkspacePath("/some/full/workspace/test/path", true)
-            ).to.equal(path.normalize("/some/full/workspace/test/path/some/relative/test/path"));
+            ).to.equalPath("/some/other/full/test/path");
+        });
+
+        test("relative configuration provided", () => {
+            buildPathConfig.setValue("some/relative/test/path");
+
+            expect(
+                BuildFlags.buildDirectoryFromWorkspacePath("/some/full/workspace/test/path", false)
+            ).to.equalPath("some/relative/test/path");
+
+            expect(
+                BuildFlags.buildDirectoryFromWorkspacePath("/some/full/workspace/test/path", true)
+            ).to.equalPath("/some/full/workspace/test/path/some/relative/test/path");
         });
     });
 
     suite("withAdditionalFlags", () => {
         const sdkConfig = mockGlobalValue(configuration, "sdk");
+        const buildPathConfig = mockGlobalValue(configuration, "buildPath");
+
+        beforeEach(() => {
+            buildPathConfig.setValue("");
+            sdkConfig.setValue("");
+            sandboxConfig.setValue(false);
+        });
 
         test("package", () => {
             for (const sub of ["dump-symbol-graph", "diagnose-api-breaking-changes", "resolve"]) {
@@ -286,6 +290,29 @@ suite("BuildFlags Test Suite", () => {
                 "-disable-sandbox",
                 "init",
             ]);
+        });
+
+        test("package plugin", () => {
+            buildPathConfig.setValue("");
+            sdkConfig.setValue("");
+            expect(
+                buildFlags.withAdditionalFlags(["package", "plugin", "my-plugin"])
+            ).to.deep.equal(["package", "plugin", "my-plugin"]);
+
+            buildPathConfig.setValue("/some/build/path");
+            expect(
+                buildFlags.withAdditionalFlags(["package", "plugin", "my-plugin", "--verbose"])
+            ).to.deep.equal(["package", "plugin", "my-plugin", "--verbose"]);
+
+            sdkConfig.setValue("/some/full/path/to/sdk");
+            expect(
+                buildFlags.withAdditionalFlags(["package", "plugin", "my-plugin"])
+            ).to.deep.equal(["package", "plugin", "my-plugin"]);
+
+            sandboxConfig.setValue(true);
+            expect(
+                buildFlags.withAdditionalFlags(["package", "plugin", "my-plugin"])
+            ).to.deep.equal(["package", "plugin", "my-plugin"]);
         });
 
         test("build", () => {
@@ -428,5 +455,144 @@ suite("BuildFlags Test Suite", () => {
             "inc2",
         ]);
         expect(filterArguments(["-one=1", "-zero=0", "-one1=1"])).to.deep.equal(["-one=1"]);
+    });
+
+    suite("getBuildBinaryPath", () => {
+        const buildArgsConfig = mockGlobalValue(configuration, "buildArguments");
+        let execSwiftSpy: sinon.SinonSpy;
+        const logger: MockedObject<SwiftLogger> = mockObject<SwiftLogger>({
+            warn: sinon.spy(),
+        });
+
+        setup(async () => {
+            execSwiftSpy = sinon.spy(() =>
+                Promise.resolve({ stdout: "/test/bin/path\n", stderr: "" })
+            );
+            sinon.replace(utilities, "execSwift", execSwiftSpy);
+
+            // Clear cache before each test
+            BuildFlags.clearBuildPathCache();
+            buildArgsConfig.setValue([]);
+        });
+
+        teardown(() => {
+            sinon.restore();
+            BuildFlags.clearBuildPathCache();
+        });
+
+        test("debug configuration calls swift build with correct arguments", async () => {
+            const result = await buildFlags.getBuildBinaryPath(
+                "/test/workspace",
+                "debug",
+                instance(logger)
+            );
+
+            expect(result).to.equal("/test/bin/path");
+            expect(execSwiftSpy).to.have.been.calledOnce;
+
+            const [args, , options] = execSwiftSpy.firstCall.args;
+            expect(args).to.include("build");
+            expect(args).to.include("--show-bin-path");
+            expect(args).to.include("--configuration");
+            expect(args).to.include("debug");
+            expect(options.cwd).to.equal("/test/workspace");
+        });
+
+        test("release configuration calls swift build with correct arguments", async () => {
+            const result = await buildFlags.getBuildBinaryPath(
+                "/test/workspace",
+                "release",
+                instance(logger)
+            );
+
+            expect(result).to.equal("/test/bin/path");
+            expect(execSwiftSpy).to.have.been.calledOnce;
+
+            const [args] = execSwiftSpy.firstCall.args;
+            expect(args).to.include("--configuration");
+            expect(args).to.include("release");
+        });
+
+        test("includes build arguments in command", async () => {
+            buildArgsConfig.setValue(["--build-system", "swiftbuild"]);
+
+            await buildFlags.getBuildBinaryPath("/test/workspace", "debug", instance(logger));
+
+            const [args] = execSwiftSpy.firstCall.args;
+            expect(args).to.include("--build-system");
+            expect(args).to.include("swiftbuild");
+        });
+
+        test("caches results based on workspace and configuration", async () => {
+            // First call
+            const result1 = await buildFlags.getBuildBinaryPath(
+                "/test/workspace",
+                "debug",
+                instance(logger)
+            );
+            expect(result1).to.equal("/test/bin/path");
+            expect(execSwiftSpy).to.have.been.calledOnce;
+
+            // Second call should use cache
+            const result2 = await buildFlags.getBuildBinaryPath(
+                "/test/workspace",
+                "debug",
+                instance(logger)
+            );
+            expect(result2).to.equal("/test/bin/path");
+            expect(execSwiftSpy).to.have.been.calledOnce; // Still only one call
+
+            // Different configuration should not use cache
+            const result3 = await buildFlags.getBuildBinaryPath(
+                "/test/workspace",
+                "release",
+                instance(logger)
+            );
+            expect(result3).to.equal("/test/bin/path");
+            expect(execSwiftSpy).to.have.been.calledTwice;
+        });
+
+        test("different build arguments create different cache entries", async () => {
+            // First call with no build arguments
+            await buildFlags.getBuildBinaryPath("/test/workspace", "debug", instance(logger));
+            expect(execSwiftSpy).to.have.been.calledOnce;
+
+            // Change build arguments
+            buildArgsConfig.setValue(["--build-system", "swiftbuild"]);
+
+            // Second call should not use cache due to different build arguments
+            await buildFlags.getBuildBinaryPath("/test/workspace", "debug", instance(logger));
+            expect(execSwiftSpy).to.have.been.calledTwice;
+        });
+
+        test("falls back to traditional path on error", async () => {
+            // Restore the previous stub first
+            sinon.restore();
+
+            // Mock execSwift to throw an error
+            execSwiftSpy = sinon.spy(() => Promise.reject(new Error("Command failed")));
+            sinon.replace(utilities, "execSwift", execSwiftSpy);
+
+            const log = instance(logger);
+            const result = await buildFlags.getBuildBinaryPath("/test/workspace", "debug", log);
+
+            // Should fallback to traditional path
+            expect(result).to.equalPath("/test/workspace/.build/debug");
+            expect(log.warn).to.have.been.calledOnce;
+        });
+
+        test("clearBuildPathCache clears all cached entries", async () => {
+            // Cache some entries
+            await buildFlags.getBuildBinaryPath("cwd", "debug", instance(logger));
+            await buildFlags.getBuildBinaryPath("cwd", "release", instance(logger));
+            expect(execSwiftSpy).to.have.been.calledTwice;
+
+            // Clear cache
+            BuildFlags.clearBuildPathCache();
+
+            // Next calls should execute again
+            await buildFlags.getBuildBinaryPath("cwd", "debug", instance(logger));
+            expect(execSwiftSpy).to.have.been.calledThrice;
+        });
     });
 });

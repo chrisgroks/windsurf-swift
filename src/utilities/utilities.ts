@@ -51,6 +51,20 @@ export const IS_RUNNING_UNDER_DOCKER = IS_RUNNING_UNDER_ACT || IS_RUNNING_UNDER_
 export const IS_RUNNING_UNDER_TEST = process.env.RUNNING_UNDER_VSCODE_TEST_CLI === "1";
 
 /**
+ * Determined by the presence of the `VSCODE_DEBUG` environment variable, set by the
+ * launch.json when starting the extension in development.
+ */
+export const IS_RUNNING_IN_DEVELOPMENT_MODE = process.env["VSCODE_DEBUG"] === "1";
+
+/** Determines whether the provided object has any properties set to non-null values. */
+export function isEmptyObject(obj: { [key: string]: unknown }): boolean {
+    const properties = Object.getOwnPropertyNames(obj).filter(
+        property => obj[property] !== undefined && obj[property] !== null
+    );
+    return properties.length === 0;
+}
+
+/**
  * Get required environment variable for Swift product
  *
  * @param base base environment configuration
@@ -138,6 +152,14 @@ export async function execFile(
         if (runtimeEnv && Object.keys(runtimeEnv).length > 0) {
             options.env = { ...(options.env ?? process.env), ...runtimeEnv };
         }
+    }
+    if (Object.keys(configuration.swiftEnvironmentVariables).length > 0) {
+        // when adding environment vars we either combine with vars passed
+        // into the function or the process environment vars
+        options.env = {
+            ...(options.env ?? process.env),
+            ...configuration.swiftEnvironmentVariables,
+        };
     }
     options = {
         ...options,
@@ -247,14 +269,6 @@ export async function execSwift(
         swift = toolchain.getToolchainExecutable("swift");
         args = toolchain.buildFlags.withAdditionalFlags(args);
     }
-    if (Object.keys(configuration.swiftEnvironmentVariables).length > 0) {
-        // when adding environment vars we either combine with vars passed
-        // into the function or the process environment vars
-        options.env = {
-            ...(options.env ?? process.env),
-            ...configuration.swiftEnvironmentVariables,
-        };
-    }
     options = {
         ...options,
         maxBuffer: options.maxBuffer ?? 1024 * 1024 * 64, // 64MB
@@ -301,6 +315,21 @@ export function compactMap<T, U>(
         return acc;
     }, []);
 }
+
+/**
+ * Create a promise that can be resolved outside the promise executor.
+ * @returns An object containing the promise that can be awaited, and its resolve and reject functions.
+ */
+export function unwrapPromise<T>() {
+    let resolve: (value: T | PromiseLike<T>) => void;
+    let reject: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return { promise, resolve: resolve!, reject: reject! };
+}
+
 /**
  * Get path to swift executable, or executable in swift bin folder
  *
@@ -443,16 +472,3 @@ export function destructuredPromise<T>(): {
     return { promise: p, resolve: resolve!, reject: reject! };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
-
-/**
- * Creates a composite disposable from multiple disposables.
- * @param disposables The disposables to include.
- * @returns A composite disposable that disposes all included disposables.
- */
-export function compositeDisposable(...disposables: vscode.Disposable[]): vscode.Disposable {
-    return {
-        dispose: () => {
-            disposables.forEach(d => d.dispose());
-        },
-    };
-}

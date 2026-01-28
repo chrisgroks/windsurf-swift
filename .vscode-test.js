@@ -23,7 +23,8 @@ const dataDir = process.env["VSCODE_DATA_DIR"];
 
 // Check if we're debugging by looking at the process executable. Unfortunately, the VS Code debugger
 // doesn't seem to allow setting environment variables on a launched extension host.
-const isDebugRun = !(process.env["_"] ?? "").endsWith("node_modules/.bin/vscode-test");
+const processPath = process.env["_"] ?? "";
+const isDebugRun = !isCIBuild && !processPath.endsWith("node_modules/.bin/vscode-test");
 
 function log(/** @type {string} */ message) {
     if (!isDebugRun) {
@@ -40,13 +41,13 @@ const launchArgs = [
     "--disable-crash-reporter",
     "--disable-workspace-trust",
     "--disable-telemetry",
+    "--disable-gpu",
+    "--disable-gpu-sandbox",
+    "--disable-chromium-sandbox",
+    "--disable-extension=vscode.git",
 ];
 if (dataDir) {
     launchArgs.push("--user-data-dir", dataDir);
-}
-// GPU hardware acceleration not working on Darwin for intel
-if (process.platform === "darwin" && process.arch === "x64") {
-    launchArgs.push("--disable-gpu");
 }
 
 const installExtensions = [];
@@ -79,7 +80,7 @@ if (vsixPath) {
     extensionDependencies.push("vadimcn.vscode-lldb", "llvm-vs-code-extensions.lldb-dap");
 }
 
-const vscodeVersion = process.env["VSCODE_VERSION"] ?? "stable";
+const vscodeVersion = process.env["VSCODE_VERSION"] ?? "1.105.1";
 log("Running tests against VS Code version " + vscodeVersion);
 
 const installConfigs = [];
@@ -122,6 +123,9 @@ module.exports = defineConfig({
                 retries: 1,
                 reporter: path.join(__dirname, ".mocha-reporter.js"),
                 reporterOptions: {
+                    githubActionsSummaryReporterOptions: {
+                        title: "Integration Test Summary",
+                    },
                     jsonReporterOptions: {
                         output: path.join(__dirname, "test-results", "integration-tests.json"),
                     },
@@ -155,6 +159,9 @@ module.exports = defineConfig({
                 retries: 1,
                 reporter: path.join(__dirname, ".mocha-reporter.js"),
                 reporterOptions: {
+                    githubActionsSummaryReporterOptions: {
+                        title: "Code Workspace Test Summary",
+                    },
                     jsonReporterOptions: {
                         output: path.join(__dirname, "test-results", "code-workspace-tests.json"),
                     },
@@ -177,6 +184,9 @@ module.exports = defineConfig({
                 slow: 100,
                 reporter: path.join(__dirname, ".mocha-reporter.js"),
                 reporterOptions: {
+                    githubActionsSummaryReporterOptions: {
+                        title: "Unit Test Summary",
+                    },
                     jsonReporterOptions: {
                         output: path.join(__dirname, "test-results", "unit-tests.json"),
                     },

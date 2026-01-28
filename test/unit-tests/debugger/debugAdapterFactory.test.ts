@@ -23,6 +23,7 @@ import * as debugAdapter from "@src/debugger/debugAdapter";
 import { LLDBDebugConfigurationProvider } from "@src/debugger/debugAdapterFactory";
 import * as lldb from "@src/debugger/lldb";
 import { SwiftLogger } from "@src/logging/SwiftLogger";
+import { BuildFlags } from "@src/toolchain/BuildFlags";
 import { SwiftToolchain } from "@src/toolchain/toolchain";
 import { Result } from "@src/utilities/result";
 import { Version } from "@src/utilities/version";
@@ -39,12 +40,17 @@ import {
 suite("LLDBDebugConfigurationProvider Tests", () => {
     let mockWorkspaceContext: MockedObject<WorkspaceContext>;
     let mockToolchain: MockedObject<SwiftToolchain>;
+    let mockBuildFlags: MockedObject<BuildFlags>;
     let mockLogger: MockedObject<SwiftLogger>;
     const mockDebugAdapter = mockGlobalObject(debugAdapter, "DebugAdapter");
     const mockWindow = mockGlobalObject(vscode, "window");
 
     setup(() => {
-        mockToolchain = mockObject<SwiftToolchain>({ swiftVersion: new Version(6, 0, 0) });
+        mockBuildFlags = mockObject<BuildFlags>({ getBuildBinaryPath: mockFn() });
+        mockToolchain = mockObject<SwiftToolchain>({
+            swiftVersion: new Version(6, 0, 0),
+            buildFlags: instance(mockBuildFlags),
+        });
         mockLogger = mockObject<SwiftLogger>({
             info: mockFn(),
         });
@@ -135,6 +141,44 @@ suite("LLDBDebugConfigurationProvider Tests", () => {
         expect(launchConfig).to.be.null;
     });
 
+    test("sets the 'program' property if a 'target' property is present", async () => {
+        mockBuildFlags.getBuildBinaryPath.resolves(
+            "/path/to/swift-executable/.build/arm64-apple-macosx/debug/"
+        );
+        const folder: vscode.WorkspaceFolder = {
+            index: 0,
+            name: "swift-executable",
+            uri: vscode.Uri.file("/path/to/swift-executable"),
+        };
+        const mockedFolderCtx = mockObject<FolderContext>({
+            workspaceContext: instance(mockWorkspaceContext),
+            workspaceFolder: folder,
+            folder: folder.uri,
+            toolchain: instance(mockToolchain),
+            relativePath: "./",
+        });
+        mockWorkspaceContext.folders = [instance(mockedFolderCtx)];
+        const configProvider = new LLDBDebugConfigurationProvider(
+            "darwin",
+            instance(mockWorkspaceContext),
+            instance(mockLogger)
+        );
+        const launchConfig = await configProvider.resolveDebugConfigurationWithSubstitutedVariables(
+            folder,
+            {
+                name: "Test Launch Config",
+                type: SWIFT_LAUNCH_CONFIG_TYPE,
+                request: "launch",
+                target: "executable",
+            }
+        );
+        expect(launchConfig)
+            .to.have.property("program")
+            .that.equalsPath(
+                "/path/to/swift-executable/.build/arm64-apple-macosx/debug/executable"
+            );
+    });
+
     suite("CodeLLDB selected in settings", () => {
         let mockLldbConfiguration: MockedObject<vscode.WorkspaceConfiguration>;
         const mockLLDB = mockGlobalModule(lldb);
@@ -149,6 +193,12 @@ suite("LLDBDebugConfigurationProvider Tests", () => {
                 get: mockFn(s => {
                     s.withArgs("library").returns("/path/to/liblldb.dyLib");
                     s.withArgs("launch.expressions").returns("native");
+                    // Add defaults for swift configuration properties
+                    s.withArgs("path").returns("");
+                    s.withArgs("runtimePath").returns("");
+                    s.withArgs("swiftEnvironmentVariables").returns({});
+                    // Default fallback
+                    s.returns(undefined);
                 }),
                 update: mockFn(),
             });
@@ -415,6 +465,7 @@ suite("LLDBDebugConfigurationProvider Tests", () => {
                     type: SWIFT_LAUNCH_CONFIG_TYPE,
                     request: "launch",
                     name: "Test Launch",
+                    program: "/path/to/some/program",
                     env: {},
                 });
 
@@ -437,6 +488,7 @@ suite("LLDBDebugConfigurationProvider Tests", () => {
                     type: SWIFT_LAUNCH_CONFIG_TYPE,
                     request: "launch",
                     name: "Test Launch",
+                    program: "/path/to/some/program",
                     env,
                 });
 

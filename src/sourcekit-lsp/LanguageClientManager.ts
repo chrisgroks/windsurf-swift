@@ -40,17 +40,22 @@ import { SourceKitLogMessageNotification, SourceKitLogMessageParams } from "./ex
 import { DidChangeActiveDocumentNotification } from "./extensions/DidChangeActiveDocumentRequest";
 import { PollIndexRequest, WorkspaceSynchronizeRequest } from "./extensions/PollIndexRequest";
 import { activateGetReferenceDocument } from "./getReferenceDocument";
-import { activateLegacyInlayHints } from "./inlayHints";
 import { activatePeekDocuments } from "./peekDocuments";
 
+/**
+ * Options for the LanguageClientManager
+ */
 interface LanguageClientManageOptions {
-    /**
-     * Options for the LanguageClientManager
-     */
     onDocumentSymbols?: (
         folder: FolderContext,
         document: vscode.TextDocument,
         symbols: vscode.DocumentSymbol[] | null | undefined
+    ) => void;
+
+    onDocumentCodeLens?: (
+        folder: FolderContext,
+        document: vscode.TextDocument,
+        codeLens: vscode.CodeLens[] | null | undefined
     ) => void;
 }
 
@@ -164,21 +169,6 @@ export class LanguageClientManager implements vscode.Disposable {
         });
 
         this.subscriptions.push(onChangeConfig);
-
-        // Swift versions prior to 5.6 don't support file changes, so need to restart
-        // lSP server when a file is either created or deleted
-        if (this.swiftVersion.isLessThan(new Version(5, 6, 0))) {
-            folderContext.workspaceContext.logger.debug("LSP: Adding new/delete file handlers");
-            // restart LSP server on creation of a new file
-            const onDidCreateFileDisposable = vscode.workspace.onDidCreateFiles(() => {
-                void this.restart();
-            });
-            // restart LSP server on deletion of a file
-            const onDidDeleteFileDisposable = vscode.workspace.onDidDeleteFiles(() => {
-                void this.restart();
-            });
-            this.subscriptions.push(onDidCreateFileDisposable, onDidDeleteFileDisposable);
-        }
 
         this.waitingOnRestartCount = 0;
         this.documentSymbolWatcher = undefined;
@@ -472,6 +462,18 @@ export class LanguageClientManager implements vscode.Disposable {
                     return;
                 }
                 this.options.onDocumentSymbols?.(documentFolderContext, document, symbols);
+            },
+            (document, codeLens) => {
+                const documentFolderContext = [this.folderContext, ...this.addedFolders].find(
+                    folderContext => document.uri.fsPath.startsWith(folderContext.folder.fsPath)
+                );
+                if (!documentFolderContext) {
+                    this.languageClientOutputChannel?.warn(
+                        "Unable to find folder for document: " + document.uri.fsPath
+                    );
+                    return;
+                }
+                this.options.onDocumentCodeLens?.(documentFolderContext, document, codeLens);
             }
         );
 
@@ -517,18 +519,16 @@ export class LanguageClientManager implements vscode.Disposable {
             this.logMessage(client, params as SourceKitLogMessageParams);
         });
 
-        // start client
-        this.clientReadyPromise = client
-            .start()
-            .then(() => runningPromise)
-            .then(() => {
+        // Create and save the client ready promise
+        this.clientReadyPromise = (async () => {
+            try {
+                // start client
+                await client.start();
+                await runningPromise;
+
                 // Now that we've started up correctly, start the error handler to auto-restart
                 // if sourcekit-lsp crashes during normal operation.
                 errorHandler.enable();
-
-                if (this.swiftVersion.isLessThan(new Version(5, 7, 0))) {
-                    this.legacyInlayHints = activateLegacyInlayHints(client);
-                }
 
                 this.peekDocuments = activatePeekDocuments(client);
                 this.getReferenceDocument = activateGetReferenceDocument(client);
@@ -546,15 +546,19 @@ export class LanguageClientManager implements vscode.Disposable {
                         this.subscriptions.push(this.didChangeActiveDocument);
                     }
                 } catch {
-                    // do nothing
+                    // do nothing, the experimental capability is not supported
                 }
-            })
-            .catch(reason => {
-                this.folderContext.workspaceContext.logger.error(reason);
-                void this.languageClient?.stop();
+            } catch (reason) {
+                this.folderContext.workspaceContext.logger.error(
+                    `Error starting SourceKit-LSP: ${reason}`
+                );
+                if (this.languageClient?.state === State.Running) {
+                    await this.languageClient?.stop();
+                }
                 this.languageClient = undefined;
                 throw reason;
-            });
+            }
+        })();
 
         this.languageClient = client;
         this.cancellationToken = new vscode.CancellationTokenSource();

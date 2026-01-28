@@ -22,6 +22,7 @@ import { SwiftExecution } from "@src/tasks/SwiftExecution";
 import { SwiftPluginTaskProvider } from "@src/tasks/SwiftPluginTaskProvider";
 import { SwiftTask } from "@src/tasks/SwiftTaskProvider";
 
+import { tag } from "../../tags";
 import {
     cleanOutput,
     executeTaskAndWaitForResult,
@@ -34,17 +35,29 @@ import {
     updateSettings,
 } from "../utilities/testutilities";
 
-suite("SwiftPluginTaskProvider Test Suite", function () {
+tag("medium").suite("SwiftPluginTaskProvider Test Suite", function () {
     let workspaceContext: WorkspaceContext;
     let folderContext: FolderContext;
 
     activateExtensionForSuite({
         async setup(ctx) {
             workspaceContext = ctx;
+            ctx.logger.info("Locating command-plugin folder in root workspace");
             folderContext = await folderInRootWorkspace("command-plugin", workspaceContext);
+            ctx.logger.info(
+                "Located command-plugin folder in root workspace at " + folderContext.folder.fsPath
+            );
             const logger = await ctx.loggerFactory.temp("SwiftPluginTaskProvider.tests");
+            ctx.logger.info("Loading swift plugins");
             await folderContext.loadSwiftPlugins(logger);
-            expect(logger.logs.length).to.equal(0, `Expected no output channel logs`);
+            ctx.logger.info(
+                "Finished loading swift plugins, captured logs should be empty: " + logger.logs
+            );
+            if (logger.logs.length > 0) {
+                expect.fail(
+                    `Expected no output channel logs: ${JSON.stringify(logger.logs, undefined, 2)}`
+                );
+            }
             expect(workspaceContext.folders).to.not.have.lengthOf(0);
         },
     });

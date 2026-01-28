@@ -162,6 +162,7 @@ suite("LanguageClientManager Suite", () => {
             outputChannel: instance(
                 mockObject<SwiftOutputChannel>({
                     dispose: mockFn(),
+                    warn: mockFn(),
                 })
             ),
             initializeResult: {
@@ -550,6 +551,14 @@ suite("LanguageClientManager Suite", () => {
                 {
                     range: new vscode.Range(0, 0, 0, 0),
                     command: {
+                        title: 'Play "bar"',
+                        command: "swift.play",
+                    },
+                    isResolved: true,
+                },
+                {
+                    range: new vscode.Range(0, 0, 0, 0),
+                    command: {
                         title: "Run",
                         command: "some.other.command",
                     },
@@ -570,7 +579,11 @@ suite("LanguageClientManager Suite", () => {
         const middleware = languageClientFactoryMock.createLanguageClient.args[0][3].middleware!;
         expect(middleware).to.have.property("provideCodeLenses");
         await expect(
-            middleware.provideCodeLenses!({} as any, {} as any, codelensesFromSourceKitLSP)
+            middleware.provideCodeLenses!(
+                { uri: vscode.Uri.file("/path/to/doc.swift") } as any,
+                {} as any,
+                codelensesFromSourceKitLSP
+            )
         ).to.eventually.deep.equal([
             {
                 range: new vscode.Range(0, 0, 0, 0),
@@ -585,6 +598,14 @@ suite("LanguageClientManager Suite", () => {
                 command: {
                     title: "$(debug)\u00A0Debug",
                     command: "swift.debug",
+                },
+                isResolved: true,
+            },
+            {
+                range: new vscode.Range(0, 0, 0, 0),
+                command: {
+                    title: '$(play)\u00A0Play "bar"',
+                    command: "swift.play",
                 },
                 isResolved: true,
             },

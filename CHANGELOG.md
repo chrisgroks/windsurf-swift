@@ -4,16 +4,72 @@
 
 ### Added
 
+- Show progress when describing/listing dependencies on package load ([#2028](https://github.com/swiftlang/vscode-swift/pull/2028))
+- Drop support for Swift 5.8 ([#1853](https://github.com/swiftlang/vscode-swift/pull/1853))
+- An official public API for the Swift extension that can be used by other Visual Studio Code extensions ([#2030](https://github.com/swiftlang/vscode-swift/pull/2030))
+- Add support for installing the swiftly toolchain manager ([1881](https://github.com/swiftlang/vscode-swift/pull/1881))
+
+### Fixed
+
+- Fix the wrong toolchain being shown as selected when using swiftly v1.0.1 ([#2014](https://github.com/swiftlang/vscode-swift/pull/2014))
+- Fix extension displaying SwiftPM's project view and automatic build tasks even when `disableSwiftPMIntegration` was true ([#2011](https://github.com/swiftlang/vscode-swift/pull/2011))
+- Validate extension settings and warn if they are invalid ([#2016](https://github.com/swiftlang/vscode-swift/pull/2016))
+- Show the Test Results panel when tests fail to compile and the user has `testing.automaticallyOpenTestResults` set to `openOnTestFailure` ([#2035](https://github.com/swiftlang/vscode-swift/pull/2035))
+- Swift-testing test runs are marked as 'started' in the UI immediately, not after compilation finishes ([#2039](https://github.com/swiftlang/vscode-swift/pull/2039))
+- Added missing icon for `macro` targets in the Project Panel ([#2043](https://github.com/swiftlang/vscode-swift/pull/2043))
+
+## 2.14.3 - 2025-12-15
+
+### Fixed
+
+- Fix extension failing to find `lldb-dap` when `swift.path` points at an Xcode toolchain ([#1998](https://github.com/swiftlang/vscode-swift/pull/1998))
+- Omit `--scratch-path` when enumerating plugins with `swift package plugin --list` ([#1996](https://github.com/swiftlang/vscode-swift/pull/1996))
+
+## 2.14.2 - 2025-12-07
+
+### Fixed
+
+- Fix extension failing to activate when Swiftly was installed via Homebrew ([#1975](https://github.com/swiftlang/vscode-swift/pull/1975))
+- Fix running `swift package` commands with `swift.disableSwiftPMIntegration` enabled ([#1969](https://github.com/swiftlang/vscode-swift/pull/1969))
+- Fixed an issue where `lldb-dap` could not be found in Command Line Tools toolchains ([#1936](https://github.com/swiftlang/vscode-swift/pull/1936))
+
+## 2.14.1 - 2025-11-20
+
+### Fixed
+
+- Suggest "Open Documentation" when toolchain not found ([#1939](https://github.com/swiftlang/vscode-swift/pull/1939))
+- Make sure all folder operation listeners get past folder add events ([#1945](https://github.com/swiftlang/vscode-swift/pull/1945))
+
+## 2.14.0 - 2025-11-11
+
+### Added
+
+- Syntax highlighting for `*.swift.gyb` files ([#1515](https://github.com/swiftlang/vscode-swift/pull/1515))
+- Activate the extension if a workspace folder contains a `.bsp` folder ([#1865](https://github.com/swiftlang/vscode-swift/pull/1865))
+
+### Fixed 
+
+- Fixed an issue where the activation of the extension was held up while waiting on the debug configuration to update ([#1914](https://github.com/swiftlang/vscode-swift/pull/1914))
+
+## 2.12.0 - 2025-10-29
+
+### Added
+
 - Swiftly toolchain installation support with commands to install stable and snapshot releases, progress tracking, and secure post-install script handling ([#1780](https://github.com/swiftlang/vscode-swift/pull/1780))
 - Prompt to restart `SourceKit-LSP` after changing `.sourcekit-lsp/config.json` files ([#1744](https://github.com/swiftlang/vscode-swift/issues/1744))
 - Prompt to cancel and replace the active test run if one is in flight ([#1774](https://github.com/swiftlang/vscode-swift/pull/1774))
 - A walkthrough for first time extension users ([#1560](https://github.com/swiftlang/vscode-swift/issues/1560))
+- Allow `swift.backgroundCompilation` setting to accept an object where enabling the `useDefaultTask` property will run the default build task, and the `release` property will run the `release` variant of the Build All task ([#1857](https://github.com/swiftlang/vscode-swift/pull/1857))
+- Added new `target` and `configuration` properties to `swift` launch configurations that can be used instead of `program` for SwiftPM based projects ([#1890](https://github.com/swiftlang/vscode-swift/pull/1890))
 
 ### Fixed
 
 - Don't start debugging XCTest cases if the swift-testing debug session was stopped ([#1797](https://github.com/swiftlang/vscode-swift/pull/1797))
 - Improve error handling when the swift path is misconfigured ([#1801](https://github.com/swiftlang/vscode-swift/pull/1801))
 - Fix an error when performing "Run/Debug Tests Multiple Times" on Linux ([#1824](https://github.com/swiftlang/vscode-swift/pull/1824))
+- Fix the `> Swift: Run Swift Script` command not running unless a Swift Package folder is open ([#1832](https://github.com/swiftlang/vscode-swift/pull/1832))
+- Fix the SourceKit-LSP diagnostics reported progress ([#1799](https://github.com/swiftlang/vscode-swift/pull/1799))
+- Omit incompatible `additionalTestArgs` when building tests for debugging ([#1864](https://github.com/swiftlang/vscode-swift/pull/1864))
 
 ## 2.11.20250806 - 2025-08-06
 

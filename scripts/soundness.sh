@@ -102,8 +102,11 @@ EOF
             \( \! -path './dist/*' -a \
             \( \! -path './assets/*' -a \
             \( \! -path './coverage/*' -a \
-            \( "${matching_files[@]}" \) \
-            \) \) \) \) \) \) \)
+            \( \! -path './.husky/*' -a \
+            \( \! -path './src/typings/*' -a \
+            \( \! -path './github-workflows/*' -a \
+            \( "${matching_files[@]}" \
+            \) \) \) \) \) \) \) \) \) \) \)
     } | while read -r line; do
       if [[ "$(replace_acceptable_years < "$line" | head -n "$expected_lines" | shasum)" != "$expected_sha" ]]; then
         printf "\033[0;31mmissing headers in file '%s'!\033[0m\n" "$line"

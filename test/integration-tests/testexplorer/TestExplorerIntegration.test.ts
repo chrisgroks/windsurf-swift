@@ -25,6 +25,7 @@ import {
     MessageRenderer,
     TestSymbol,
 } from "@src/TestExplorer/TestParsers/SwiftTestingOutputParser";
+import { TestRunProxy } from "@src/TestExplorer/TestRunner";
 import { flattenTestItemCollection, reduceTestItemChildren } from "@src/TestExplorer/TestUtils";
 import { WorkspaceContext } from "@src/WorkspaceContext";
 import { Commands } from "@src/commands";
@@ -39,6 +40,7 @@ import {
     activateExtensionForSuite,
     folderInRootWorkspace,
     updateSettings,
+    withLogging,
 } from "../utilities/testutilities";
 import {
     assertContains,
@@ -48,7 +50,7 @@ import {
     buildStateFromController,
     eventPromise,
     gatherTests,
-    runTest,
+    runTest as runTestWithLogging,
     waitForTestExplorerReady,
 } from "./utilities";
 
@@ -56,23 +58,45 @@ tag("large").suite("Test Explorer Suite", function () {
     let workspaceContext: WorkspaceContext;
     let folderContext: FolderContext;
     let testExplorer: TestExplorer;
+    let runTest: (
+        testExplorer: TestExplorer,
+        runProfile: TestKind,
+        ...tests: string[]
+    ) => Promise<TestRunProxy>;
 
     activateExtensionForSuite({
         async setup(ctx) {
+            // It can take a very long time for sourcekit-lsp to index tests on Windows,
+            // especially w/ Swift 6.0. Wait for up to 25 minutes for the indexing to complete.
+            if (process.platform === "win32") {
+                this.timeout(25 * 60 * 1000);
+            }
+
             workspaceContext = ctx;
-            folderContext = await folderInRootWorkspace("defaultPackage", workspaceContext);
+            runTest = runTestWithLogging.bind(null, workspaceContext.logger);
+            const logger = withLogging(ctx.logger);
+            folderContext = await logger("Locating defaultPackage folder in root workspace", () =>
+                folderInRootWorkspace("defaultPackage", workspaceContext)
+            );
 
             if (!folderContext) {
                 throw new Error("Unable to find test explorer");
             }
 
-            testExplorer = await folderContext.resolvedTestExplorer;
+            testExplorer = await logger(
+                "Waiting for test explorer to resolve",
+                () => folderContext.resolvedTestExplorer
+            );
 
-            await executeTaskAndWaitForResult(await createBuildAllTask(folderContext));
+            await logger("Executing build all task", async () =>
+                executeTaskAndWaitForResult(await createBuildAllTask(folderContext))
+            );
 
             // Set up the listener before bringing the text explorer in to focus,
             // which starts searching the workspace for tests.
-            await waitForTestExplorerReady(testExplorer);
+            await logger("Waiting for test explorer to be ready", () =>
+                waitForTestExplorerReady(testExplorer, workspaceContext.logger)
+            );
         },
         requiresLSP: true,
         requiresDebugger: true,
@@ -126,7 +150,24 @@ tag("large").suite("Test Explorer Suite", function () {
                 }
             });
 
-            test("Debugs specified XCTest test", runXCTest);
+            test("Debugs specified XCTest test", async function () {
+                // This test is failing consistently on Windows nightly-main (6.3-dev).
+                // Skip it until a fix is made.
+                //
+                // GitHub Issue: https://github.com/swiftlang/vscode-swift/issues/1986
+                if (
+                    workspaceContext.globalToolchain.swiftVersion.dev &&
+                    workspaceContext.globalToolchain.swiftVersion.isGreaterThanOrEqual({
+                        major: 6,
+                        minor: 3,
+                        patch: 0,
+                    })
+                ) {
+                    this.skip();
+                }
+                await runXCTest.call(this);
+            });
+
             test("Debugs specified swift-testing test", async function () {
                 await runSwiftTesting.call(this);
             });
@@ -136,7 +177,11 @@ tag("large").suite("Test Explorer Suite", function () {
             let resetSettings: (() => Promise<void>) | undefined;
             beforeEach(async function () {
                 // CodeLLDB on windows doesn't print output and so cannot be parsed
-                if (process.platform === "win32") {
+                if (
+                    process.platform === "win32" ||
+                    (process.platform === "linux" &&
+                        folderContext.swiftVersion.isGreaterThanOrEqual(new Version(6, 2, 0)))
+                ) {
                     this.skip();
                 }
 
