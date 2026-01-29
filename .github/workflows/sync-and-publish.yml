@@ -8,7 +8,7 @@ on:
       force_publish:
         description: 'Force publish even if no upstream changes'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
 jobs:
@@ -32,7 +32,9 @@ jobs:
           echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
           
           BEHIND=$(git rev-list --count HEAD..upstream/main)
-          if [ "$BEHIND" -gt "0" ] || [ "${{ inputs.force_publish }}" == "true" ]; then
+          FORCE="${{ inputs.force_publish }}"
+          echo "Commits behind: $BEHIND, Force: $FORCE"
+          if [ "$BEHIND" -gt "0" ] || [ "$FORCE" = "true" ]; then
             echo "has_updates=true" >> $GITHUB_OUTPUT
           else
             echo "has_updates=false" >> $GITHUB_OUTPUT
