@@ -1,0 +1,106 @@
+name: Sync Upstream & Publish to Open VSX
+
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: 'Force publish even if no upstream changes'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      has_updates: ${{ steps.check.outputs.has_updates }}
+      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for upstream updates
+        id: check
+        run: |
+          git remote add upstream https://github.com/swiftlang/vscode-swift.git
+          git fetch upstream main
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+          
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          if [ "$BEHIND" -gt "0" ] || [ "${{ inputs.force_publish }}" == "true" ]; then
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+          fi
+
+  sync-and-build:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+
+      - name: Sync with upstream
+        run: |
+          git remote add upstream https://github.com/swiftlang/vscode-swift.git
+          git fetch upstream main
+          git merge upstream/main --no-edit -m "Sync with upstream (automated)"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install and build
+        run: |
+          npm install --ignore-scripts
+          npm run compile
+
+      - name: Package extension
+        run: |
+          npx vsce package --allow-missing-repository --no-dependencies
+          echo "VSIX_FILE=$(ls *.vsix)" >> $GITHUB_ENV
+
+      - name: Push sync commit
+        run: git push origin main
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}-pending
+          name: "🔄 Pending Release - Review Required"
+          body: |
+            ## Upstream Sync Ready for Review
+            
+            Synced with upstream: `${{ needs.check-upstream.outputs.upstream_sha }}`
+            
+            **To publish:** Edit this release, uncheck "pre-release", and publish.
+          draft: true
+          prerelease: true
+          files: ${{ env.VSIX_FILE }}
+
+  publish:
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: robinraju/release-downloader@v1
+        with:
+          latest: true
+          fileName: "*.vsix"
+
+      - name: Publish to Open VSX
+        run: npx ovsx publish *.vsix -p ${{ secrets.OVSX_PAT }}
